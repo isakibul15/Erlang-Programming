@@ -1,5 +1,5 @@
 -module(http).
--export([parse_request/1]).
+-export([parse_request/1, ok/1]).
 
 parse_request(R0) ->
     {Request, R1} = request_line(R0),
@@ -40,3 +40,6 @@ header([C|R0]) ->
 
 message_body(R) ->
     {R, []}.
+
+ok(Body) ->
+    "HTTP/1.1 200 OK\r\n" ++ "\r\n" ++ Body.
