@@ -1,13 +1,11 @@
 -module(rudy).
--export([start/1, stop/0, init/1]).
+-export([start/1, stop/0]).
 
 start(Port) ->
-    % Start the server process
-    init(Port).
+    register(rudy, spawn(fun() -> init(Port) end)).
 
 stop() ->
-    % For now, we'll just let it terminate after one request
-    ok.
+    exit(whereis(rudy), "time to die").
 
 init(Port) ->
     Opt = [list, {active, false}, {reuseaddr, true}],
@@ -30,7 +28,7 @@ handler(Listen) ->
             % Close the client connection
             gen_tcp:close(Client),
             % For now, terminate after one request
-            ok;
+            handler(Listen);
         {error, Error} ->
             error
     end.
@@ -50,4 +48,6 @@ request(Client) ->
     end.
 
 reply({{get, _URI, _}, _Headers, _Body}) ->
-    http:ok("Hello from Rudy Server!").
+    http:ok("Hello from Rudy Server!");
+reply(_) ->
+    http:ok("Unsupported request type").
