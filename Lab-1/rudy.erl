@@ -48,6 +48,8 @@ request(Client) ->
     end.
 
 reply({{get, _URI, _}, _Headers, _Body}) ->
+    timer:sleep(40),
     http:ok("Hello from Rudy Server!");
 reply(_) ->
+    timer:sleep(40),
     http:ok("Unsupported request type").
