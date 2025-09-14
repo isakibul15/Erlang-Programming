@@ -1,21 +1,8 @@
 -module(tut2).
--export([sum/1, member/2]).
+-export([convert/2]).
 
-sum(L) -> 
-    case L of 
-        [] -> 
-            0;
-        [H|T] -> 
-            H + sum(T)
-    end.
+convert(M, inch) -> 
+    M / 2.54;
 
-
-member(X,L) ->
-    case L of 
-        [] -> 
-            no;
-        [X|_] -> 
-            yes;
-        [_|T] -> 
-            member(X,T)
-    end.
+convert(N, centimeter) -> 
+    N * 2.54.
