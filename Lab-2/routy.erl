@@ -1,4 +1,8 @@
+%% =========================================================
+%% routy.erl  —  A tiny link-state router (assignment-ready)
+%% =========================================================
 -module(routy).
+
 -export([
     start/2, stop/1,
     add/3, remove/2, status/1,
@@ -15,8 +19,8 @@ stop(Reg) ->
     unregister(Reg),
     ok.
 
-add(Reg, Node, PidOrRemoteName) ->
-    Reg ! {add, Node, PidOrRemoteName},
+add(Reg, Node, PidOrRemote) ->
+    Reg ! {add, Node, PidOrRemote},
     ok.
 
 remove(Reg, Node) ->
@@ -27,7 +31,7 @@ status(Reg) ->
     Reg ! {status, self()},
     receive
         {status, S} -> S
-    after 1000 ->
+    after 3000 ->              %% a little more patient across nodes
         timeout
     end.
 
@@ -46,85 +50,97 @@ send(Reg, To, Message) ->
 %% ───────── Internals ─────────
 
 init(Name) ->
-    Intf  = interfaces:new(),
-    Map   = map:new(),
-    %% Gateways empty initially; first useful table will be after broadcast+update
+    ok = io:setopts([{encoding, utf8}]),
+    Intf  = interfaces:new(),      %% neighbor address book
+    Map   = map:new(),             %% network map
     Table = dijkstra:table([], Map),
-    Hist  = hist:new(Name),
+    Hist  = hist:new(Name),        %% duplicate filter (own name set old)
     router(Name, 0, Hist, Intf, Table, Map).
 
 router(Name, N, Hist, Intf, Table, Map) ->
     receive
+        %% Add a neighbor (Pid or {Reg,'node@host'})
+        {add, Node, PidOrRemote} ->
+            case valid_pidref(PidOrRemote) of
+                true ->
+                    Ref   = erlang:monitor(process, PidOrRemote),
+                    Intf1 = interfaces:add(Node, Ref, PidOrRemote, Intf),
+                    router(Name, N, Hist, Intf1, Table, Map);
+                false ->
+                    %% ignore bad arg silently (assignment keeps smiling)
+                    router(Name, N, Hist, Intf, Table, Map)
+            end;
 
-        %% Add a neighbor: PidOrRemoteName is either <0.X.Y> or {Reg, 'node@host'}
-        {add, Node, PidOrRemoteName} ->
-            Ref   = erlang:monitor(process, PidOrRemoteName),
-            Intf1 = interfaces:add(Node, Ref, PidOrRemoteName, Intf),
-            router(Name, N, Hist, Intf1, Table, Map);
-
-        %% Remove a neighbor explicitly
+        %% Explicit remove
         {remove, Node} ->
             case interfaces:ref(Node, Intf) of
                 {ok, Ref} -> erlang:demonitor(Ref);
                 notfound  -> ok
             end,
             Intf1 = interfaces:remove(Node, Intf),
-            router(Name, N, Hist, Intf1, Table, Map);
+            %% recompute locally so table reflects changed gateways
+            Table1 = dijkstra:table(interfaces:list(Intf1), Map),
+            router(Name, N, Hist, Intf1, Table1, Map);
 
-        %% Monitor fired: the neighbor died or never existed on this node
+        %% A monitored neighbor died (or never existed)
         {'DOWN', Ref, process, _Pid, _Reason} ->
             case interfaces:name(Ref, Intf) of
                 {ok, Down} ->
                     io:format("~p: exit received from ~p~n", [Name, Down]),
-                    Intf1 = interfaces:remove(Down, Intf),
-                    router(Name, N, Hist, Intf1, Table, Map);
+                    Intf1  = interfaces:remove(Down, Intf),
+                    Table1 = dijkstra:table(interfaces:list(Intf1), Map),
+                    router(Name, N, Hist, Intf1, Table1, Map);
                 notfound ->
                     router(Name, N, Hist, Intf, Table, Map)
             end;
 
-        %% Inspect full state (for debugging)
+        %% Peek at full state
         {status, From} ->
             From ! {status, {Name, N, Hist, Intf, Table, Map}},
             router(Name, N, Hist, Intf, Table, Map);
 
-        %% Link-state message received: dedup via history, flood, and update map
+        %% Link-state flooding (receive)
         {links, Node, R, Links} ->
             case hist:update(Node, R, Hist) of
                 {new, Hist1} ->
+                    %% forward flood
                     interfaces:broadcast({links, Node, R, Links}, Intf),
-                    Map1 = map:update(Node, Links, Map),
-                    %% Keep manual update; recompute only when user sends 'update'
-                    router(Name, N, Hist1, Intf, Table, Map1);
+                    %% update our map
+                    Map1   = map:update(Node, Links, Map),
+                    %% fast local recompute (no broadcast here!)
+                    Table1 = dijkstra:table(interfaces:list(Intf), Map1),
+                    router(Name, N, Hist1, Intf, Table1, Map1);
                 old ->
                     router(Name, N, Hist, Intf, Table, Map)
             end;
 
-        %% Manually recompute routing table (Dijkstra)
+        %% Manual recompute (Dijkstra)
         update ->
-            Gateways = interfaces:list(Intf),
-            Table1   = dijkstra:table(Gateways, Map),
+            Table1 = dijkstra:table(interfaces:list(Intf), Map),
             router(Name, N, Hist, Intf, Table1, Map);
 
-        %% Manually broadcast our current links (and bump our sequence counter)
+        %% Manual broadcast of our current links (and bump seq)
         broadcast ->
             Links   = interfaces:list(Intf),
             Message = {links, Name, N, Links},
             interfaces:broadcast(Message, Intf),
             router(Name, N+1, Hist, Intf, Table, Map);
 
-        %% Destination case FIRST (message arrived)
+        %% Deliver at destination
         {route, To, From, Message} when To =:= Name ->
-            io:format("~p: received message ~s from ~p~n", [Name, Message, From]),
+            io:format("~p: received message ~ts from ~p~n",
+                      [Name, Message, From]),
             router(Name, N, Hist, Intf, Table, Map);
 
-        %% Forwarding case
+        %% Forward en route
         {route, To, From, Message} ->
-            io:format("~p: routing message ~s to ~p~n", [Name, Message, To]),
+            io:format("~p: routing message ~ts to ~p~n",
+                      [Name, Message, To]),
             case dijkstra:route(To, Table) of
                 {ok, Gw} ->
                     case interfaces:lookup(Gw, Intf) of
-                        {ok, PidOrRemoteName} ->
-                            PidOrRemoteName ! {route, To, From, Message};
+                        {ok, PidOrRemote} ->
+                            PidOrRemote ! {route, To, From, Message};
                         notfound ->
                             ok
                     end;
@@ -133,7 +149,7 @@ router(Name, N, Hist, Intf, Table, Map) ->
             end,
             router(Name, N, Hist, Intf, Table, Map);
 
-        %% Local injection helper
+        %% Local injection
         {send, To, Message} ->
             self() ! {route, To, Name, Message},
             router(Name, N, Hist, Intf, Table, Map);
@@ -141,3 +157,10 @@ router(Name, N, Hist, Intf, Table, Map) ->
         stop ->
             ok
     end.
+
+%% ───────── Helpers ─────────
+
+%% Accept either a pid() or a remote {Reg,'node@host'} tuple.
+valid_pidref(P) when is_pid(P) -> true;
+valid_pidref({Reg, Node}) when is_atom(Reg), is_atom(Node) -> true;
+valid_pidref(_) -> false.
