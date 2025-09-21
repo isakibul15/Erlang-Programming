@@ -20,4 +20,4 @@ loop() ->
     end.
 
 log(From, Time, Msg) ->
-    io:format("log: ~w ~w ~p~n", [Time, From, Msg]).
+    io:format("log: ~p ~p ~p~n", [Time, From, Msg]).

@@ -11,41 +11,50 @@ peers(Wrk, Peers) ->
     Wrk ! {peers, Peers}.
 
 init(Name, Log, Seed, Sleep, Jitter) ->
-    % Replace deprecated random:seed with rand:seed
-    rand:seed(exsss, {Seed, Seed, Seed}),
+    %% Proper rand seeding
+    rand:seed(exsplus, {Seed, Seed*2+1, Seed*3+7}),
     receive
         {peers, Peers} ->
-            loop(Name, Log, Peers, Sleep, Jitter);
+            T0 = time:zero(),
+            loop(Name, Log, Peers, Sleep, Jitter, T0);
         stop ->
             ok
     end.
 
-loop(Name, Log, Peers, Sleep, Jitter) ->
-    % Replace deprecated random:uniform with rand:uniform
+loop(Name, Log, Peers, Sleep, Jitter, T) ->
     Wait = rand:uniform(Sleep),
     receive
-        {msg, Time, Msg} ->
-            Log ! {log, Name, Time, {received, Msg}},
-            loop(Name, Log, Peers, Sleep, Jitter);
+        {msg, Tm, Msg} ->
+            %% Merge then inc on receive
+            T1 = time:merge(T, Tm),
+            T2 = time:inc(T1, Name),
+            Log ! {log, Name, T2, {received, Msg}},
+            loop(Name, Log, Peers, Sleep, Jitter, T2);
+
         stop ->
             ok;
+
         Error ->
-            Log ! {log, Name, na, {error, Error}}
+            %% Keep running after logging the error
+            Log ! {log, Name, T, {error, Error}},
+            loop(Name, Log, Peers, Sleep, Jitter, T)
     after Wait ->
         Selected = select(Peers),
-        Time = na,
-        % Replace deprecated random:uniform with rand:uniform
+        %% Increment on local send event
+        T1 = time:inc(T, Name),
         Message = {hello, rand:uniform(100)},
-        Selected ! {msg, Time, Message},
+        Selected ! {msg, T1, Message},
         jitter(Jitter),
-        Log ! {log, Name, Time, {sending, Message}},
-        loop(Name, Log, Peers, Sleep, Jitter)
+        Log ! {log, Name, T1, {sending, Message}},
+        loop(Name, Log, Peers, Sleep, Jitter, T1)
     end.
 
+select([]) ->
+    exit(no_peers);
 select(Peers) ->
-    % Replace deprecated random:uniform with rand:uniform
     lists:nth(rand:uniform(length(Peers)), Peers).
 
-jitter(0) -> ok;
-% Replace deprecated random:uniform with rand:uniform
-jitter(Jitter) -> timer:sleep(rand:uniform(Jitter)).
+jitter(0) ->
+    ok;
+jitter(Jitter) ->
+    timer:sleep(rand:uniform(Jitter)).
