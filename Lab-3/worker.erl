@@ -11,7 +11,8 @@ peers(Wrk, Peers) ->
     Wrk ! {peers, Peers}.
 
 init(Name, Log, Seed, Sleep, Jitter) ->
-    random:seed(Seed, Seed, Seed),
+    % Replace deprecated random:seed with rand:seed
+    rand:seed(exsss, {Seed, Seed, Seed}),
     receive
         {peers, Peers} ->
             loop(Name, Log, Peers, Sleep, Jitter);
@@ -20,7 +21,8 @@ init(Name, Log, Seed, Sleep, Jitter) ->
     end.
 
 loop(Name, Log, Peers, Sleep, Jitter) ->
-    Wait = random:uniform(Sleep),
+    % Replace deprecated random:uniform with rand:uniform
+    Wait = rand:uniform(Sleep),
     receive
         {msg, Time, Msg} ->
             Log ! {log, Name, Time, {received, Msg}},
@@ -32,7 +34,8 @@ loop(Name, Log, Peers, Sleep, Jitter) ->
     after Wait ->
         Selected = select(Peers),
         Time = na,
-        Message = {hello, random:uniform(100)},
+        % Replace deprecated random:uniform with rand:uniform
+        Message = {hello, rand:uniform(100)},
         Selected ! {msg, Time, Message},
         jitter(Jitter),
         Log ! {log, Name, Time, {sending, Message}},
@@ -40,7 +43,9 @@ loop(Name, Log, Peers, Sleep, Jitter) ->
     end.
 
 select(Peers) ->
-    lists:nth(random:uniform(length(Peers)), Peers).
+    % Replace deprecated random:uniform with rand:uniform
+    lists:nth(rand:uniform(length(Peers)), Peers).
 
 jitter(0) -> ok;
-jitter(Jitter) -> timer:sleep(random:uniform(Jitter)).
+% Replace deprecated random:uniform with rand:uniform
+jitter(Jitter) -> timer:sleep(rand:uniform(Jitter)).
