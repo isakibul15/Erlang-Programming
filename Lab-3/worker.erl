@@ -11,50 +11,39 @@ peers(Wrk, Peers) ->
     Wrk ! {peers, Peers}.
 
 init(Name, Log, Seed, Sleep, Jitter) ->
-    %% Proper rand seeding
-    rand:seed(exsplus, {Seed, Seed*2+1, Seed*3+7}),
+    rand:seed(exsss, {Seed, Seed, Seed}),
     receive
         {peers, Peers} ->
-            T0 = time:zero(),
-            loop(Name, Log, Peers, Sleep, Jitter, T0);
+            loop(Name, Log, Peers, Sleep, Jitter, time:zero());
         stop ->
             ok
     end.
 
-loop(Name, Log, Peers, Sleep, Jitter, T) ->
+loop(Name, Log, Peers, Sleep, Jitter, Time) ->
     Wait = rand:uniform(Sleep),
     receive
-        {msg, Tm, Msg} ->
-            %% Merge then inc on receive
-            T1 = time:merge(T, Tm),
-            T2 = time:inc(T1, Name),
-            Log ! {log, Name, T2, {received, Msg}},
-            loop(Name, Log, Peers, Sleep, Jitter, T2);
-
+        {msg, From, TimeMsg, Msg} ->
+            MergedTime = time:merge(Time, TimeMsg),
+            NewTime = time:inc(Name, MergedTime),
+            Log ! {log, Name, NewTime, {received, Msg}},
+            loop(Name, Log, Peers, Sleep, Jitter, NewTime);
         stop ->
             ok;
-
         Error ->
-            %% Keep running after logging the error
-            Log ! {log, Name, T, {error, Error}},
-            loop(Name, Log, Peers, Sleep, Jitter, T)
+            Log ! {log, Name, Time, {error, Error}},
+            loop(Name, Log, Peers, Sleep, Jitter, Time)
     after Wait ->
         Selected = select(Peers),
-        %% Increment on local send event
-        T1 = time:inc(T, Name),
+        NewTime = time:inc(Name, Time),
         Message = {hello, rand:uniform(100)},
-        Selected ! {msg, T1, Message},
+        Selected ! {msg, Name, NewTime, Message},
         jitter(Jitter),
-        Log ! {log, Name, T1, {sending, Message}},
-        loop(Name, Log, Peers, Sleep, Jitter, T1)
+        Log ! {log, Name, NewTime, {sending, Message}},
+        loop(Name, Log, Peers, Sleep, Jitter, NewTime)
     end.
 
-select([]) ->
-    exit(no_peers);
 select(Peers) ->
     lists:nth(rand:uniform(length(Peers)), Peers).
 
-jitter(0) ->
-    ok;
-jitter(Jitter) ->
-    timer:sleep(rand:uniform(Jitter)).
+jitter(0) -> ok;
+jitter(Jitter) -> timer:sleep(rand:uniform(Jitter)).

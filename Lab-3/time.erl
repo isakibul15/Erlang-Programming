@@ -1,38 +1,25 @@
 -module(time).
--export([
-    zero/0, inc/2, merge/2, leq/2,
-    clock/1,               %% make per-node clock map
-    update/3,              %% update(Name, Time, ClockMap) -> ClockMap'
-    safe/2                 %% safe(Time, ClockMap) -> boolean()
-]).
-
-%% ---- Lamport scalar time ----
+-export([zero/0, inc/2, merge/2, leq/2, clock/1, update/3, safe/2]).
 
 zero() ->
     0.
 
-inc(T, _Name) when is_integer(T) ->
+inc(_Name, T) ->
     T + 1.
 
-merge(T1, T2) when is_integer(T1), is_integer(T2) ->
-    if T1 >= T2 -> T1; true -> T2 end.
+merge(Ti, Tj) ->
+    max(Ti, Tj).
 
-leq(T1, T2) when is_integer(T1), is_integer(T2) ->
-    T1 =< T2.
+leq(Ti, Tj) ->
+    Ti =< Tj.
 
-%% ---- Logger helpers ----
+clock(Nodes) ->
+    lists:foldl(fun(Node, Acc) -> maps:put(Node, 0, Acc) end, #{}, Nodes).
 
-%% clock/1: initialize a map #{Name => 0, ...}
-clock(Names) when is_list(Names) ->
-    lists:foldl(fun(N, M) -> M#{N => 0} end, #{}, Names).
+update(Node, Time, Clock) ->
+    Current = maps:get(Node, Clock, 0),
+    NewTime = max(Current, Time),
+    maps:put(Node, NewTime, Clock).
 
-%% update/3: advance knowledge about Name's clock
-update(Name, Time, Clocks) when is_map(Clocks), is_integer(Time) ->
-    Prev = maps:get(Name, Clocks, 0),
-    Clocks#{Name => (if Time > Prev -> Time; true -> Prev end)}.
-
-%% safe/2: a message with timestamp T is safe to print iff
-%% T =< min over all known process times
-safe(T, Clocks) when map_size(Clocks) > 0 ->
-    Min = lists:min(maps:values(Clocks)),
-    T =< Min.
+safe(Time, Clock) ->
+    lists:all(fun({_Node, T}) -> T >= Time end, maps:to_list(Clock)).
