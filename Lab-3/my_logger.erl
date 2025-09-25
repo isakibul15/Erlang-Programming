@@ -17,13 +17,13 @@ loop(Clock, Queue) ->
             NewClock = time:update(From, Time, Clock),
             NewQueue = insert({Time, From, Msg}, Queue),
             {SafeMessages, UpdatedQueue} = process_queue(NewClock, NewQueue, []),
-            lists:foreach(fun({T, F, M}) -> log(F, T, M) end, SafeMessages),
-            loop(NewClock, UpdatedQueue);
+            lists:foreach(fun({T, F, M}) -> log(F, T, M) end, SafeMessages),  % Prints all safe messages
+            loop(NewClock, UpdatedQueue); % Continue looping with updated clock and queue
         stop ->
             ok
     end.
 
-insert(Message, []) ->
+insert(Message, []) -> %Eta [] mane khali thakle message insert koro
     [Message];
 insert({T1, From1, Msg1}, [{T2, From2, Msg2} | Rest]) ->
     if
