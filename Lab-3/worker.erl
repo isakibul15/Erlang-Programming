@@ -8,7 +8,7 @@ stop(Worker) ->
     Worker ! stop.
 
 peers(Wrk, Peers) ->
-    Wrk ! {peers, Peers}.
+    Wrk ! {peers, Peers}. % ei line e worker ke bole tader peer list
 
 init(Name, Log, Seed, Sleep, Jitter) ->
     rand:seed(exsss, {Seed, Seed, Seed}),
