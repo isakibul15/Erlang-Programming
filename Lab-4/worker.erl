@@ -1,11 +1,10 @@
 -module(worker).
-
 -export([start/4, start/5]).
 
 -define(change, 20).
 -define(color, {0,0,0}).
 
-% Start a worker given:
+%  Start a worker given:
 %  Id - a unique interger, only used for debugging
 %  Module - the module we want to use, i.e. gms1
 %  Rnd - a value to seed the random generator
@@ -157,9 +156,3 @@ wait(Sleep) ->
 
 change_color(N, {R,G,B}) ->
     {G, B, ((R+N) rem 256)}.
-
-     
-
-
- 
-
