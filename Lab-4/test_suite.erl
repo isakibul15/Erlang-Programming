@@ -24,9 +24,9 @@ test_gms1() ->
     %% Create group
     W1 = test:first(1, gms1, 1000),
     timer:sleep(2000),
-    _W2 = test:add(2, gms1, W1, 1000),
+    W2 = test:add(2, gms1, W1, 1000),
     timer:sleep(2000),
-    _W3 = test:add(3, gms1, W1, 1000),
+    W3 = test:add(3, gms1, W1, 1000),
     timer:sleep(5000),
     
     %% Test basic functionality
@@ -40,8 +40,8 @@ test_gms1() ->
     test:sleep(W1, 500),
     timer:sleep(3000),
     
-    %% Cleanup - ensure all workers are stopped
-    cleanup_workers([W1]),
+    %% Cleanup - stop all workers
+    cleanup_workers([W1, W2, W3]),
     io:format("gms1 test completed successfully.~n"),
     ok.
 
@@ -53,7 +53,7 @@ test_gms2() ->
     timer:sleep(2000),
     W2 = test:add(2, gms2, W1, 1000),
     timer:sleep(2000),
-    _W3 = test:add(3, gms2, W1, 1000),
+    W3 = test:add(3, gms2, W1, 1000),
     timer:sleep(5000),
     
     %% Test before failure
@@ -75,8 +75,8 @@ test_gms2() ->
     test:go(W2),
     timer:sleep(2000),
     
-    %% Cleanup
-    cleanup_workers([W2]),
+    %% Cleanup - stop all remaining workers
+    cleanup_workers([W2, W3]),
     io:format("gms2 test completed successfully.~n"),
     ok.
 
@@ -88,7 +88,7 @@ test_gms3() ->
     timer:sleep(2000),
     W2 = test:add(2, gms3, W1, 1000),
     timer:sleep(2000),
-    _W3 = test:add(3, gms3, W1, 1000),
+    W3 = test:add(3, gms3, W1, 1000),
     timer:sleep(5000),
     
     %% Test reliable multicast
@@ -110,25 +110,62 @@ test_gms3() ->
     test:go(W2),
     timer:sleep(2000),
     
-    %% Cleanup
-    cleanup_workers([W2]),
+    %% Cleanup - stop all remaining workers
+    cleanup_workers([W2, W3]),
     io:format("gms3 test completed successfully.~n"),
     ok.
 
-%% Helper function to cleanup workers properly
+%% Enhanced cleanup function
 cleanup_workers(Workers) ->
+    io:format("Cleaning up ~w workers...~n", [length(Workers)]),
+    
+    %% Send stop to all workers
     lists:foreach(fun(W) -> 
-        catch (W ! stop),
-        timer:sleep(100)
+        io:format("Stopping worker ~w...~n", [W]),
+        W ! stop 
     end, Workers),
-    timer:sleep(1000).  % Give time for processes to terminate
+    
+    %% Wait for processes to terminate
+    timer:sleep(2000),
+    
+    %% Force kill any remaining processes
+    lists:foreach(fun(W) ->
+        case process_info(W) of
+            undefined -> 
+                ok; % Process already dead
+            _ -> 
+                io:format("Force killing worker ~w...~n", [W]),
+                exit(W, kill)
+        end
+    end, Workers),
+    
+    timer:sleep(1000),
+    io:format("Cleanup completed.~n").
 
-%% Individual test functions for debugging
+%% Function to check if any worker processes are still running
+check_running_processes() ->
+    AllProcesses = processes(),
+    WorkerProcesses = [P || P <- AllProcesses, 
+                           case process_info(P, registered_name) of
+                               {registered_name, []} -> 
+                                   case process_info(P, initial_call) of
+                                       {initial_call, {worker, init, _}} -> true;
+                                       _ -> false
+                                   end;
+                               _ -> false
+                           end],
+    case WorkerProcesses of
+        [] -> 
+            io:format("No worker processes running.~n");
+        List -> 
+            io:format("Still running: ~w~n", [List])
+    end.
+
+%% Quick test functions
 quick_test_gms1() ->
     W1 = test:first(1, gms1, 1000),
     timer:sleep(3000),
-    test:stop(W1),
-    timer:sleep(1000).
+    cleanup_workers([W1]).
 
 quick_test_gms2() ->
     W1 = test:first(1, gms2, 1000),
@@ -137,13 +174,11 @@ quick_test_gms2() ->
     timer:sleep(3000),
     exit(W1, kill),
     timer:sleep(2000),
-    test:stop(W2),
-    timer:sleep(1000).
+    cleanup_workers([W2]).
 
 quick_test_gms3() ->
     W1 = test:first(1, gms3, 1000),
     timer:sleep(2000),
     _W2 = test:add(2, gms3, W1, 1000),
     timer:sleep(3000),
-    test:stop(W1),
-    timer:sleep(1000).
+    cleanup_workers([W1]).
