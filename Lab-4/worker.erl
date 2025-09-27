@@ -1,10 +1,10 @@
 -module(worker).
 -export([start/4, start/5]).
-
+-define(argh, 1000).  % 1/1000 chance of crashing
 -define(change, 20).
 -define(color, {0,0,0}).
 
-%  Start a worker given:
+% Start a worker given:
 %  Id - a unique interger, only used for debugging
 %  Module - the module we want to use, i.e. gms1
 %  Rnd - a value to seed the random generator
@@ -58,7 +58,7 @@ state(Id, Ref) ->
 % know we know everything to continue. 
 		
 init_cont(Id, Rnd, Cast, Color, Sleep) ->
-    random:seed(Rnd, Rnd, Rnd),
+    rand:seed(exsplus, {Rnd, Rnd, Rnd}),  % Use rand instead of deprecated random
     Title = "Worker: " ++ integer_to_list(Id),
     Gui = gui:start(Title, self()),
     Gui ! {color, Color}, 
@@ -121,7 +121,7 @@ worker(Id, Cast, Color, Gui, Sleep) ->
     after Wait ->
 	    %% Ok, let's propose a change of colors
 	    %% io:format("worker ~w mcast message~n", [Id]),
-	    Cast !  {mcast, {change, random:uniform(?change)}},
+	    Cast !  {mcast, {change, rand:uniform(?change)}},  % Fixed: use rand instead of random
 	    worker(Id, Cast, Color, Gui, Sleep)	    
     end.
 
@@ -139,13 +139,22 @@ frozen(Id, Cast, Color, Gui, Sleep) ->
 	    frozen(Id, Cast, Color, Gui, Sleep)
     end.
 
+%% Add crash function for testing (call this in gms modules)
+crash(Id) ->
+    case rand:uniform(?argh) of
+        ?argh ->
+            io:format("leader ~w: crash!~n", [Id]),
+            exit(no_luck);
+        _ ->
+            ok
+    end.
 
 wait(Sleep) ->
     if 
 	Sleep == 0 -> 
 	    0; 
 	true -> 
-	    random:uniform(Sleep) 
+	    rand:uniform(Sleep)  % Fixed: use rand instead of random
     end.
 
 %% Change of color, we rotate RGB and add N. Since we also make a
