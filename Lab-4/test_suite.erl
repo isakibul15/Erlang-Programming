@@ -24,9 +24,9 @@ test_gms1() ->
     %% Create group
     W1 = test:first(1, gms1, 1000),
     timer:sleep(2000),
-    W2 = test:add(2, gms1, W1, 1000),
+    _W2 = test:add(2, gms1, W1, 1000),
     timer:sleep(2000),
-    W3 = test:add(3, gms1, W1, 1000),
+    _W3 = test:add(3, gms1, W1, 1000),
     timer:sleep(5000),
     
     %% Test basic functionality
@@ -40,8 +40,8 @@ test_gms1() ->
     test:sleep(W1, 500),
     timer:sleep(3000),
     
-    %% Cleanup
-    test:stop(W1),
+    %% Cleanup - ensure all workers are stopped
+    cleanup_workers([W1]),
     io:format("gms1 test completed successfully.~n"),
     ok.
 
@@ -53,7 +53,7 @@ test_gms2() ->
     timer:sleep(2000),
     W2 = test:add(2, gms2, W1, 1000),
     timer:sleep(2000),
-    W3 = test:add(3, gms2, W1, 1000),
+    _W3 = test:add(3, gms2, W1, 1000),
     timer:sleep(5000),
     
     %% Test before failure
@@ -76,7 +76,7 @@ test_gms2() ->
     timer:sleep(2000),
     
     %% Cleanup
-    test:stop(W2),
+    cleanup_workers([W2]),
     io:format("gms2 test completed successfully.~n"),
     ok.
 
@@ -88,7 +88,7 @@ test_gms3() ->
     timer:sleep(2000),
     W2 = test:add(2, gms3, W1, 1000),
     timer:sleep(2000),
-    W3 = test:add(3, gms3, W1, 1000),
+    _W3 = test:add(3, gms3, W1, 1000),
     timer:sleep(5000),
     
     %% Test reliable multicast
@@ -111,15 +111,24 @@ test_gms3() ->
     timer:sleep(2000),
     
     %% Cleanup
-    test:stop(W2),
+    cleanup_workers([W2]),
     io:format("gms3 test completed successfully.~n"),
     ok.
+
+%% Helper function to cleanup workers properly
+cleanup_workers(Workers) ->
+    lists:foreach(fun(W) -> 
+        catch (W ! stop),
+        timer:sleep(100)
+    end, Workers),
+    timer:sleep(1000).  % Give time for processes to terminate
 
 %% Individual test functions for debugging
 quick_test_gms1() ->
     W1 = test:first(1, gms1, 1000),
     timer:sleep(3000),
-    test:stop(W1).
+    test:stop(W1),
+    timer:sleep(1000).
 
 quick_test_gms2() ->
     W1 = test:first(1, gms2, 1000),
@@ -128,11 +137,13 @@ quick_test_gms2() ->
     timer:sleep(3000),
     exit(W1, kill),
     timer:sleep(2000),
-    test:stop(W2).
+    test:stop(W2),
+    timer:sleep(1000).
 
 quick_test_gms3() ->
     W1 = test:first(1, gms3, 1000),
     timer:sleep(2000),
-    W2 = test:add(2, gms3, W1, 1000),
+    _W2 = test:add(2, gms3, W1, 1000),
     timer:sleep(3000),
-    test:stop(W1).
+    test:stop(W1),
+    timer:sleep(1000).

@@ -20,8 +20,8 @@ init(Id, Grp, Master) ->
     receive
         {view, N, [Leader|Slaves], Group} ->
             Master ! {view, Group},
-            erlang:monitor(process, Leader),
-            slave(Id, Master, Leader, N+1, {view, N, [Leader|Slaves], Group}, Slaves, Group)
+            MonitorRef = erlang:monitor(process, Leader),
+            slave(Id, Master, Leader, MonitorRef, N+1, {view, N, [Leader|Slaves], Group}, Slaves, Group)
     after 5000 ->
         Master ! {error, "no reply from leader"}
     end.
@@ -51,40 +51,40 @@ leader(Id, Master, W, Slaves, Group) ->
             leader(Id, Master, W, Slaves, Group)
     end.
 
-%% Slave process implementation with sequence numbers
-slave(Id, Master, Leader, W, Last, Slaves, Group) ->
+%% Slave process implementation with sequence numbers and monitor reference
+slave(Id, Master, Leader, MonitorRef, W, Last, Slaves, Group) ->
     receive
         %% Multicast message from application - forward to leader
         {mcast, Msg} ->
             Leader ! {mcast, Msg},
-            slave(Id, Master, Leader, W, Last, Slaves, Group);
+            slave(Id, Master, Leader, MonitorRef, W, Last, Slaves, Group);
         
         %% Join request from application - forward to leader
         {join, Wrk, Peer} ->
             Leader ! {join, Wrk, Peer},
-            slave(Id, Master, Leader, W, Last, Slaves, Group);
+            slave(Id, Master, Leader, MonitorRef, W, Last, Slaves, Group);
         
         %% Message from leader with sequence number
-        {msg, I, _} when I < W ->  % Duplicate message - ignore
-            slave(Id, Master, Leader, W, Last, Slaves, Group);
+        {msg, I, _Msg} when I < W ->  % Duplicate message - ignore
+            slave(Id, Master, Leader, MonitorRef, W, Last, Slaves, Group);
         
         {msg, I, Msg} when I == W ->  % Expected message
             Master ! Msg,
-            slave(Id, Master, Leader, W+1, {msg, I, Msg}, Slaves, Group);
+            slave(Id, Master, Leader, MonitorRef, W+1, {msg, I, Msg}, Slaves, Group);
         
         %% View message from leader with sequence number
-        {view, I, [NewLeader|Slaves2], Group2} when I < W ->  % Duplicate view - ignore
-            slave(Id, Master, Leader, W, Last, Slaves, Group);
+        {view, I, [NewLeader|_Slaves2], _Group2} when I < W ->  % Duplicate view - ignore
+            slave(Id, Master, Leader, MonitorRef, W, Last, Slaves, Group);
         
         {view, I, [NewLeader|Slaves2], Group2} when I == W ->  % Expected view
             Master ! {view, Group2},
             %% Update monitor to new leader if it changed
-            erlang:demonitor(process, Leader),
-            erlang:monitor(process, NewLeader),
-            slave(Id, Master, NewLeader, W+1, {view, I, [NewLeader|Slaves2], Group2}, Slaves2, Group2);
+            erlang:demonitor(MonitorRef),
+            NewMonitorRef = erlang:monitor(process, NewLeader),
+            slave(Id, Master, NewLeader, NewMonitorRef, W+1, {view, I, [NewLeader|Slaves2], Group2}, Slaves2, Group2);
         
         %% Leader down - start election
-        {'DOWN', _Ref, process, Leader, _Reason} ->
+        {'DOWN', MonitorRef, process, Leader, _Reason} ->
             io:format("Node ~w: Leader ~w is down, starting election~n", [Id, Leader]),
             election(Id, Master, W, Last, Slaves, Group);
         
@@ -93,7 +93,7 @@ slave(Id, Master, Leader, W, Last, Slaves, Group) ->
         
         Unexpected ->
             io:format("slave ~w: unexpected message ~w~n", [Id, Unexpected]),
-            slave(Id, Master, Leader, W, Last, Slaves, Group)
+            slave(Id, Master, Leader, MonitorRef, W, Last, Slaves, Group)
     end.
 
 %% Election process with sequence numbers
@@ -109,8 +109,8 @@ election(Id, Master, W, Last, Slaves, Group) ->
             leader(Id, Master, W+1, Rest, Group);
         [Leader|Rest] ->  % Elect the first slave as new leader
             io:format("Node ~w: Electing ~w as new leader~n", [Id, Leader]),
-            erlang:monitor(process, Leader),
-            slave(Id, Master, Leader, W, Last, Rest, Group)
+            MonitorRef = erlang:monitor(process, Leader),
+            slave(Id, Master, Leader, MonitorRef, W, Last, Rest, Group)
     end.
 
 %% Helper function to broadcast message to all nodes

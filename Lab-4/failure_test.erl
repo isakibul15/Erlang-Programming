@@ -11,7 +11,7 @@ test_message_loss_prevention() ->
     timer:sleep(2000),
     W2 = test:add(2, gms3, W1, 500),
     timer:sleep(2000),
-    W3 = test:add(3, gms3, W1, 500),
+    _W3 = test:add(3, gms3, W1, 500),
     timer:sleep(5000),
     
     %% Send multiple messages quickly
@@ -34,42 +34,40 @@ test_message_loss_prevention() ->
     timer:sleep(2000),
     
     test:stop(W2),
+    timer:sleep(1000),
     io:format("Message loss prevention test completed.~n").
 
 test_multiple_failures() ->
     io:format("=== Testing Multiple Sequential Failures ===~n"),
     
     %% Create larger group
-    Workers = [test:first(1, gms2, 1000)],
+    W1 = test:first(1, gms2, 1000),
     timer:sleep(2000),
-    
-    %% Add more workers
-    lists:foreach(fun(N) ->
-        timer:sleep(1000),
-        W = test:add(N, gms2, hd(Workers), 1000),
-        Workers = [W | Workers]
-    end, lists:seq(2, 4)),
-    
+    W2 = test:add(2, gms2, W1, 1000),
+    timer:sleep(2000),
+    W3 = test:add(3, gms2, W1, 1000),
+    timer:sleep(2000),
+    W4 = test:add(4, gms2, W1, 1000),
     timer:sleep(5000),
     
     %% Sequential failures
     io:format("Testing sequential leader failures...~n"),
-    [First | Rest] = Workers,
-    exit(First, kill),  % Kill first leader
+    exit(W1, kill),  % Kill first leader
     timer:sleep(3000),
     
-    NewLeader = hd(Rest),
-    exit(NewLeader, kill),  % Kill second leader
+    exit(W2, kill),  % Kill second leader
     timer:sleep(3000),
     
     %% System should still work
-    test:freeze(hd(tl(Rest))),
+    test:freeze(W3),
     timer:sleep(2000),
-    test:go(hd(tl(Rest))),
+    test:go(W3),
     timer:sleep(2000),
     
     %% Cleanup remaining workers
-    lists:foreach(fun(W) -> test:stop(W) end, tl(tl(Rest))),
+    test:stop(W3),
+    test:stop(W4),
+    timer:sleep(1000),
     io:format("Multiple failures test completed.~n").
 
 test_join_during_failure() ->
@@ -96,4 +94,5 @@ test_join_during_failure() ->
     
     timer:sleep(3000),
     test:stop(W2),
+    timer:sleep(1000),
     io:format("Join during failure test completed.~n").
