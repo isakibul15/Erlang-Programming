@@ -64,21 +64,24 @@ slave(Id, Master, Leader, W, Last, Slaves, Group) ->
             Leader ! {join, Wrk, Peer},
             slave(Id, Master, Leader, W, Last, Slaves, Group);
         
-        %% Message from leader with sequence number - FIXED: use _ for unused variables
-        {msg, I, _Msg} when I < W ->  % Duplicate message - ignore
+        %% Message from leader with sequence number
+        {msg, I, _} when I < W ->  % Duplicate message - ignore
             slave(Id, Master, Leader, W, Last, Slaves, Group);
         
         {msg, I, Msg} when I == W ->  % Expected message
             Master ! Msg,
             slave(Id, Master, Leader, W+1, {msg, I, Msg}, Slaves, Group);
         
-        %% View message from leader with sequence number - FIXED: use _ for unused variables
-        {view, I, [Leader|_Slaves2], _Group2} when I < W ->  % Duplicate view - ignore
+        %% View message from leader with sequence number
+        {view, I, [NewLeader|Slaves2], Group2} when I < W ->  % Duplicate view - ignore
             slave(Id, Master, Leader, W, Last, Slaves, Group);
         
-        {view, I, [Leader|Slaves2], Group2} when I == W ->  % Expected view
+        {view, I, [NewLeader|Slaves2], Group2} when I == W ->  % Expected view
             Master ! {view, Group2},
-            slave(Id, Master, Leader, W+1, {view, I, [Leader|Slaves2], Group2}, Slaves2, Group2);
+            %% Update monitor to new leader if it changed
+            erlang:demonitor(process, Leader),
+            erlang:monitor(process, NewLeader),
+            slave(Id, Master, NewLeader, W+1, {view, I, [NewLeader|Slaves2], Group2}, Slaves2, Group2);
         
         %% Leader down - start election
         {'DOWN', _Ref, process, Leader, _Reason} ->
