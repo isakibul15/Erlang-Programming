@@ -1,8 +1,5 @@
 -module(test).
-
 -compile(export_all).
-
-
 
 % Used to create the first worker, try:
 %
@@ -41,25 +38,5 @@ go(Wrk) ->
 sleep(Wrk, Sleep) ->
     Wrk ! {send, {sleep, Sleep}}.
 
-go(Wrk) ->
+stop(Wrk) ->  % CHANGED: Fixed duplicate go/1 to stop/1
     Wrk ! {send, stop}.
-
-
-			  
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
