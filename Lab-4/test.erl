@@ -6,7 +6,7 @@
 % W1 = test:first(1, gms1, 1000)
 
 first(N, Module, Sleep) ->
-   worker:start(N, Module, random:uniform(256), Sleep).
+   worker:start(N, Module, rand:uniform(256), Sleep).  % Fixed: use rand
 
 % Used to create additional workers, try:
 %
@@ -14,7 +14,7 @@ first(N, Module, Sleep) ->
 %  test:add(3, gms1, W1, 1000) and ...
 
 add(N, Module, Wrk, Sleep) ->
-   worker:start(N, Module, random:uniform(256), Wrk, Sleep).
+   worker:start(N, Module, rand:uniform(256), Wrk, Sleep).  % Fixed: use rand
 
 %% To create a number of workers in one go, 
 
@@ -38,5 +38,5 @@ go(Wrk) ->
 sleep(Wrk, Sleep) ->
     Wrk ! {send, {sleep, Sleep}}.
 
-stop(Wrk) ->  % CHANGED: Fixed duplicate go/1 to stop/1
+stop(Wrk) ->
     Wrk ! {send, stop}.

@@ -65,76 +65,96 @@ init_cont(Id, Rnd, Cast, Color, Sleep) ->
     Title = "Worker: " ++ integer_to_list(Id),
     Gui = gui:start(Title, self()),
     Gui ! {color, Color}, 
-    worker(Id, Cast, Color, Gui, Sleep),
-    Cast ! stop,
-    Gui ! stop.
+    
+    % Monitor the Cast process to detect if it dies
+    MonitorRef = erlang:monitor(process, Cast),
+    
+    worker(Id, Cast, MonitorRef, Color, Gui, Sleep),
+    
+    % Cleanup when worker loop exits
+    Gui ! stop,
+    ok.
 
-% The worker process
-worker(Id, Cast, Color, Gui, Sleep) ->
+% The worker process with monitor for Cast process
+worker(Id, Cast, MonitorRef, Color, Gui, Sleep) ->
     Wait = wait(Sleep),
     receive
         %% Someone wants us to change the color
         {change, N} ->
             Color2 = change_color(N, Color),
             Gui ! {color, Color2},
-            worker(Id, Cast, Color2, Gui, Sleep);
+            worker(Id, Cast, MonitorRef, Color2, Gui, Sleep);
 
         %% Someone needs to know the state at this point
         {state_request, Ref} ->
             Cast ! {mcast, {state, Ref, Color}},
-            worker(Id, Cast, Color, Gui, Sleep);
+            worker(Id, Cast, MonitorRef, Color, Gui, Sleep);
 
         %% A reply on a state request but we don't care    
         {state, _, _} ->
-            worker(Id, Cast, Color, Gui, Sleep);    
+            worker(Id, Cast, MonitorRef, Color, Gui, Sleep);    
 
         %% Someone wants to join our group
         {join, Peer, Gms} ->
             Cast ! {join, Peer, Gms},
-            worker(Id, Cast, Color, Gui, Sleep);    
+            worker(Id, Cast, MonitorRef, Color, Gui, Sleep);    
 
         %% A view, who cares
         {view, _} ->
-            worker(Id, Cast, Color, Gui, Sleep);    
+            worker(Id, Cast, MonitorRef, Color, Gui, Sleep);    
 
         %% So I should stop for a while
         freeze ->
-            frozen(Id, Cast, Color, Gui, Sleep);   
+            frozen(Id, Cast, MonitorRef, Color, Gui, Sleep);   
 
         %% Change the sleep time
         {sleep, Slp} ->
-            worker(Id, Cast, Color, Gui, Slp);  
+            worker(Id, Cast, MonitorRef, Color, Gui, Slp);  
 
         %% That's all folks
         stop ->
+            Cast ! stop,
+            ok;
+
+        %% Cast process died - terminate worker
+        {'DOWN', MonitorRef, process, Cast, _Reason} ->
+            io:format("Worker ~w: Group process died, terminating~n", [Id]),
+            Gui ! stop,
             ok;
 
         %% Someone from above wants us to multicast a message.
         {send, Msg} ->
             Cast ! {mcast, Msg},    
-            worker(Id, Cast, Color, Gui, Sleep);    
+            worker(Id, Cast, MonitorRef, Color, Gui, Sleep);    
 
         Error ->
             io:format("strange message: ~w~n", [Error]),
-            worker(Id, Cast, Color, Gui, Sleep)
+            worker(Id, Cast, MonitorRef, Color, Gui, Sleep)
 
     after Wait ->
             %% Ok, let's propose a change of colors
             Cast ! {mcast, {change, rand:uniform(?change)}},
-            worker(Id, Cast, Color, Gui, Sleep)    
+            worker(Id, Cast, MonitorRef, Color, Gui, Sleep)    
     end.
 
-frozen(Id, Cast, Color, Gui, Sleep) ->
+frozen(Id, Cast, MonitorRef, Color, Gui, Sleep) ->
     receive 
         go ->
-            worker(Id, Cast, Color, Gui, Sleep);
+            worker(Id, Cast, MonitorRef, Color, Gui, Sleep);
         stop ->
+            Cast ! stop,
+            ok;
+
+        %% Cast process died - terminate
+        {'DOWN', MonitorRef, process, Cast, _Reason} ->
+            io:format("Worker ~w: Group process died, terminating~n", [Id]),
+            Gui ! stop,
             ok;
 
         %% Someone from above wants us to multicast a message.
         {send, Msg} ->
             Cast ! {mcast, Msg},    
-            frozen(Id, Cast, Color, Gui, Sleep)
+            frozen(Id, Cast, MonitorRef, Color, Gui, Sleep)
     end.
 
 %% Crash function for testing (call this in gms modules)
