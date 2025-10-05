@@ -1,14 +1,15 @@
 -module(node1).
--export([start/1, start/2]).
+-export([start/1, start/2, probe/1]).
 
 -define(Stabilize, 1000).
 -define(Timeout, 2000).
 
-%% API
+% API
 start(Id) -> start(Id, nil).
 start(Id, Peer) -> spawn(fun() -> init(Id, Peer) end).
+probe(Pid) -> Pid ! probe, ok.
 
-%% Internal
+% Internal
 init(Id, nil) ->
     %% first node: successor is self
     schedule_stabilize(),
@@ -18,7 +19,7 @@ init(Id, Peer) ->
     schedule_stabilize(),
     node(Id, nil, Succ).
 
-%% Message loop. Handles ring maintenance only.
+%% Message loop. Handles ring maintenance + probe.
 node(Id, Predecessor, Successor) ->
     receive
         %% Who are you?
@@ -46,20 +47,34 @@ node(Id, Predecessor, Successor) ->
             stabilize(Successor),
             node(Id, Predecessor, Successor);
 
-        %% Optional: print status
+        %% Status print
         {print, From} ->
             From ! {state, Id, Predecessor, Successor},
+            node(Id, Predecessor, Successor);
+
+        %% ---- Probe messages ----
+        probe ->
+            create_probe(Id, Successor),
+            node(Id, Predecessor, Successor);
+
+        {probe, Id, Nodes, T} ->
+            remove_probe(T, Nodes),
+            node(Id, Predecessor, Successor);
+
+        {probe, Ref, Nodes, T} ->
+            forward_probe(Ref, T, Nodes, Id, Successor),
             node(Id, Predecessor, Successor)
     end.
 
 %% -------- stabilization --------
+
 schedule_stabilize() ->
     timer:send_interval(?Stabilize, self(), stabilize).
 
 %% Send request to successor asking for its predecessor
 stabilize({_, Spid}) ->
     Spid ! {request, self()}.
-
+    
 %% Reply to a {request, Peer}. If we have no predecessor, say nil.
 request(Peer, nil) ->
     Peer ! {status, nil};
@@ -67,7 +82,7 @@ request(Peer, Pred = {_K,_Pid}) ->
     Peer ! {status, Pred}.
 
 %% Accept better predecessor if appropriate.
-notify(New = {NKey, _NPid}, Id, nil) ->
+notify(New = {NKey, _NPid}, _Id, nil) ->
     New;
 notify(New = {NKey, _NPid}, Id, Pred = {PKey, _}) ->
     case key:between(NKey, PKey, Id) of
@@ -89,7 +104,6 @@ stabilize(PredOfSucc, Id, Successor = {SKey, SPid}) ->
         {XKey, XPid} ->
             case key:between(XKey, Id, SKey) of
                 true ->
-                    %% adopt closer successor and immediately query it
                     XPid ! {request, self()},
                     {XKey, XPid};
                 false ->
@@ -110,3 +124,20 @@ connect(_Id, Peer) ->
     after ?Timeout ->
         exit({timeout_connect, Peer})
     end.
+
+%% -------- probe helpers --------
+
+create_probe(Id, {_, Spid}) ->
+    Ref = make_ref(),
+    Now = erlang:system_time(microsecond),
+    Spid ! {probe, Ref, [{Id, self()}], Now}.
+
+forward_probe(Ref, T, Nodes, Id, {_, Spid}) ->
+    Spid ! {probe, Ref, [{Id, self()} | Nodes], T}.
+
+remove_probe(T, Nodes) ->
+    Now = erlang:system_time(microsecond),
+    DtUs = Now - T,
+    Ring = lists:reverse(Nodes),
+    io:format("Probe complete. Nodes=~p  time=~pus (~p ms)~n",
+              [Ring, DtUs, DtUs/1000]).

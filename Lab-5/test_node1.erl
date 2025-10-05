@@ -1,4 +1,3 @@
-%% Simple test runner for Section 1 ring
 -module(test_node1).
 -export([run/0]).
 
@@ -14,10 +13,9 @@ run() ->
     io:format("Starting node C joining B~n"),
     C = node1:start(key:generate(), B),
 
-    %% wait for a few stabilize ticks
+   
     timer:sleep(3500),
 
-    %% ask each to print state
     A ! {print, self()},
     B ! {print, self()},
     C ! {print, self()},
