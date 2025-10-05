@@ -11,6 +11,8 @@ reliable_test() ->
     timer:sleep(2000),
     W3 = worker:start(3, gms3, 333, W1, 1000),
     timer:sleep(5000),
+    W4 = worker:start(4, gms3, 444, W1, 1000),
+    timer:sleep(5000),
     
     %% Test reliable multicast
     io:format("Testing reliable multicast...~n"),
@@ -20,4 +22,5 @@ reliable_test() ->
     W1 ! stop,
     W2 ! stop,
     W3 ! stop,
+    W4 ! stop,
     ok.
