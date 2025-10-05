@@ -13,6 +13,8 @@ test_message_loss_prevention() ->
     timer:sleep(2000),
     _W3 = test:add(3, gms3, W1, 500),
     timer:sleep(5000),
+    W4 = test:add(4, gms3, W1, 500),
+    timer:sleep(5000),
     
     %% Send multiple messages quickly
     io:format("Sending rapid messages...~n"),
@@ -35,7 +37,7 @@ test_message_loss_prevention() ->
     
     test:stop(W2),
     timer:sleep(1000),
-    io:format("Message loss prevention test completed.~n").
+    io:format("Message loss prevention test completed.~n"). 
 
 test_multiple_failures() ->
     io:format("=== Testing Multiple Sequential Failures ===~n"),
@@ -63,6 +65,10 @@ test_multiple_failures() ->
     timer:sleep(2000),
     test:go(W3),
     timer:sleep(2000),
+    test:freeze(W4),
+    timer:sleep(2000),
+    test:go(W4),
+    timer:sleep(2000),
     
     %% Cleanup remaining workers
     test:stop(W3),
@@ -77,7 +83,11 @@ test_join_during_failure() ->
     timer:sleep(2000),
     W2 = test:add(2, gms2, W1, 1000),
     timer:sleep(2000),
-    
+    W3 = test:add(3, gms2, W1, 1000),
+    timer:sleep(2000),
+    W4 = test:add(4, gms2, W1, 1000),
+    timer:sleep(5000),
+
     %% Kill leader and immediately try to join
     exit(W1, kill),
     

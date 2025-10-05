@@ -28,6 +28,8 @@ test_gms1() ->
     timer:sleep(2000),
     W3 = test:add(3, gms1, W1, 1000),
     timer:sleep(5000),
+    W4 = test:add(4, gms1, W1, 1000),
+    timer:sleep(5000),
     
     %% Test basic functionality
     io:format("Testing basic commands...~n"),
@@ -55,7 +57,9 @@ test_gms2() ->
     timer:sleep(2000),
     W3 = test:add(3, gms2, W1, 1000),
     timer:sleep(5000),
-    
+    W4 = test:add(4, gms2, W1, 1000),
+    timer:sleep(5000),
+
     %% Test before failure
     io:format("Testing before leader failure...~n"),
     test:freeze(W1),
@@ -76,7 +80,7 @@ test_gms2() ->
     timer:sleep(2000),
     
     %% Cleanup - stop all remaining workers
-    cleanup_workers([W2, W3]),
+    cleanup_workers([W2, W3, W4]),
     io:format("gms2 test completed successfully.~n"),
     ok.
 
@@ -90,7 +94,9 @@ test_gms3() ->
     timer:sleep(2000),
     W3 = test:add(3, gms3, W1, 1000),
     timer:sleep(5000),
-    
+    W4 = test:add(4, gms3, W1, 1000),
+    timer:sleep(5000),
+
     %% Test reliable multicast
     io:format("Testing reliable multicast...~n"),
     test:freeze(W1),
@@ -111,7 +117,7 @@ test_gms3() ->
     timer:sleep(2000),
     
     %% Cleanup - stop all remaining workers
-    cleanup_workers([W2, W3]),
+    cleanup_workers([W2, W3, W4]),
     io:format("gms3 test completed successfully.~n"),
     ok.
 

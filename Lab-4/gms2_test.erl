@@ -12,6 +12,8 @@ failure_test() ->
     timer:sleep(2000),
     W3 = worker:start(3, gms2, 333, W1, 1000),
     timer:sleep(5000),
+    W4 = worker:start(4, gms2, 444, W1, 1000),
+    timer:sleep(5000),
     
     %% Kill the leader (W1)
     io:format("Killing leader (Worker 1)...~n"),
@@ -25,4 +27,5 @@ failure_test() ->
     %% Cleanup
     W2 ! stop,
     W3 ! stop,
+    W4 ! stop,
     ok.

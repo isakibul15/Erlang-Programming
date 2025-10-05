@@ -1,3 +1,10 @@
+%% gms_stress.erl
+%% Scalable stress tests for gms2 and gms3:
+%% - Start N workers
+%% - Randomly kill subsets (often including the leader)
+%% - Add replacements
+%% - Recover even if all nodes die
+
 -module(gms_stress).
 -compile(export_all).
 
@@ -25,9 +32,9 @@ loop(Module, Sleep, I, Rounds, TargetN, Workers0) ->
     timer:sleep(800),
 
     %% choose how many to kill this round
-    MaxKill = min( max(1, length(Workers0) div 4), 4 ),
-    KillCount = 1 + rand:uniform(MaxKill),
-    KillList  = pick_unique(Workers0, KillCount),
+    MaxKill  = min( max(1, length(Workers0) div 4), 4 ),
+    KillCnt  = 1 + rand:uniform(MaxKill),
+    KillList = pick_unique(Workers0, KillCnt),
 
     lists:foreach(fun(W) -> io:format("KILL ~p~n",[W]), exit(W, kill) end, KillList),
     Survivors = [W || W <- Workers0, not lists:member(W, KillList)],
@@ -36,7 +43,7 @@ loop(Module, Sleep, I, Rounds, TargetN, Workers0) ->
     %% add same number of replacements, attach to any survivor
     AttachPeer = case Survivors of [] -> undefined; [P|_] -> P end,
     {Workers1, _NextId} =
-        add_replacements(Module, Survivors, AttachPeer, Sleep, KillCount, next_id(seed_id())+I*1000),
+        add_replacements(Module, Survivors, AttachPeer, Sleep, KillCnt, seed_id()),
 
     %% occasionally burst kill more
     Workers2 =
@@ -74,20 +81,29 @@ start_joins(Module, Id, N, Peer, Sleep, Acc) ->
     start_joins(Module, Id+1, N, Peer, Sleep, [W|Acc]).
 
 %% -------- add replacements --------
-add_replacements(_Module, Workers, undefined, _Sleep, 0, NextId) ->
-    {Workers, NextId};
-add_replacements(Module, Workers, _Peer, _Sleep, 0, NextId) ->
+%% When there are no survivors, bootstrap a fresh head, then add the rest joining it.
+add_replacements(Module, Workers, undefined, Sleep, K, NextId) when K > 0 ->
+    W0 = worker:start(NextId, Module, 100 + NextId, Sleep),
+    timer:sleep(300),
+    add_replacements(Module, [W0|Workers], W0, Sleep, K-1, NextId+1);
+add_replacements(_Module, Workers, _Peer, _Sleep, 0, NextId) ->
     {Workers, NextId};
 add_replacements(Module, Workers, Peer, Sleep, K, NextId) when K > 0 ->
     W = worker:start(NextId, Module, 100 + NextId, Peer, Sleep),
     timer:sleep(250),
     add_replacements(Module, [W|Workers], Peer, Sleep, K-1, NextId+1).
 
+%% Refill to TargetN, even from empty
+replenish(Module, [], Sleep, TargetN) ->
+    Id = seed_id(),
+    W0 = worker:start(Id, Module, 200 + Id, Sleep),
+    timer:sleep(300),
+    replenish(Module, [W0], Sleep, TargetN);
 replenish(_Module, Workers, _Sleep, TargetN) when length(Workers) >= TargetN ->
     Workers;
 replenish(Module, Workers, Sleep, TargetN) ->
     Peer = hd(Workers),
-    Id = next_id(seed_id()) + rand:uniform(100000),
+    Id = seed_id(),
     W = worker:start(Id, Module, 200 + Id, Peer, Sleep),
     timer:sleep(250),
     replenish(Module, [W|Workers], Sleep, TargetN).
@@ -118,12 +134,18 @@ stop_all(Workers) ->
     timer:sleep(500),
     ok.
 
-%% produce a monotonic-ish id base per node
+%% --- ID helpers (robust, positive, monotonic-ish) ---
 seed_id() ->
-    {_, S2, S3} = now_time(),
-    S2 + S3.
+    erlang:unique_integer([monotonic, positive]).
 
+next_id(Base) ->
+    Base.
+
+%% If needed elsewhere
 now_time() ->
-    erlang:monotonic_time(), erlang:system_time(), erlang:unique_integer([monotonic]).
+    {erlang:monotonic_time(),
+     erlang:system_time(),
+     erlang:unique_integer([monotonic, positive])}.
 
-next_id(Base) -> Base.
+%% after Workers3 computed
+_ = (catch test_assert:assert_converged(Workers3, 5, 200)),
