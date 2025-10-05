@@ -13,18 +13,12 @@ probe(Pid) -> Pid ! probe, ok.
 add(Pid, Key, Val) ->
     Qref = make_ref(),
     Pid ! {add, Key, Val, Qref, self()},
-    receive
-        {Qref, ok} -> ok
-    after ?Timeout -> timeout
-    end.
+    receive {Qref, ok} -> ok after ?Timeout -> timeout end.
 
 lookup(Pid, Key) ->
     Qref = make_ref(),
     Pid ! {lookup, Key, Qref, self()},
-    receive
-        {Qref, Result} -> Result
-    after ?Timeout -> timeout
-    end.
+    receive {Qref, Result} -> Result after ?Timeout -> timeout end.
 
 %% Internal
 init(Id, nil) ->
@@ -79,15 +73,19 @@ node(Id, Predecessor, Successor, Store) ->
             From ! {state, Id, Predecessor, Successor, Store},
             node(Id, Predecessor, Successor, Store);
 
-        %% probe support
+        %% probe support (Section 1.7)
         probe ->
             create_probe(Id, Successor),
             node(Id, Predecessor, Successor, Store);
+
+        %% if second element equals our Id -> finished lap
         {probe, Id, Nodes, T} ->
             remove_probe(T, Nodes),
             node(Id, Predecessor, Successor, Store);
-        {probe, Ref, Nodes, T} ->
-            forward_probe(Ref, T, Nodes, Id, Successor),
+
+        %% otherwise forward and append self
+        {probe, I, Nodes, T} ->
+            forward_probe(I, T, Nodes, Id, Successor),
             node(Id, Predecessor, Successor, Store)
     end.
 
@@ -97,7 +95,7 @@ schedule_stabilize() ->
 
 stabilize({_, Spid}) ->
     Spid ! {request, self()}.
-    
+
 request(Peer, nil) -> Peer ! {status, nil};
 request(Peer, Pred = {_K,_Pid}) -> Peer ! {status, Pred}.
 
@@ -132,7 +130,7 @@ stabilize(PredOfSucc, Id, Successor = {SKey, SPid}) ->
             Successor;
         {XKey, XPid} ->
             case key:between(XKey, Id, SKey) of
-                true ->
+                true  ->
                     XPid ! {request, self()},
                     {XKey, XPid};
                 false ->
@@ -149,42 +147,32 @@ connect(_Id, Peer) ->
     Peer ! {key, Qref, self()},
     receive
         {Qref, SKey} -> {ok, {SKey, Peer}}
-    after ?Timeout ->
-        exit({timeout_connect, Peer})
+    after ?Timeout -> exit({timeout_connect, Peer})
     end.
 
 %% -------- store ops --------
-responsible(_Key, _Id, nil) ->
-    true;  %% one node owns all
-responsible(Key, Id, {PKey,_}) ->
-    key:between(Key, PKey, Id).
+responsible(_Key, _Id, nil) -> true;  %% one node owns all
+responsible(Key, Id, {PKey,_}) -> key:between(Key, PKey, Id).
 
 do_add(Key, Val, Qref, Client, Id, Pred, {_, Spid}, Store) ->
     case responsible(Key, Id, Pred) of
-        true  ->
-            Client ! {Qref, ok},
-            storage:add(Key, Val, Store);
-        false ->
-            Spid ! {add, Key, Val, Qref, Client},
-            Store
+        true  -> Client ! {Qref, ok}, storage:add(Key, Val, Store);
+        false -> Spid ! {add, Key, Val, Qref, Client}, Store
     end.
 
 do_lookup(Key, Qref, Client, Id, Pred, {_, Spid}, Store) ->
     case responsible(Key, Id, Pred) of
-        true  ->
-            Client ! {Qref, storage:lookup(Key, Store)};
-        false ->
-            Spid ! {lookup, Key, Qref, Client}
+        true  -> Client ! {Qref, storage:lookup(Key, Store)};
+        false -> Spid ! {lookup, Key, Qref, Client}
     end.
 
 %% -------- probe helpers --------
 create_probe(Id, {_, Spid}) ->
-    Ref = make_ref(),
     Now = erlang:system_time(microsecond),
-    Spid ! {probe, Ref, [{Id, self()}], Now}.
+    Spid ! {probe, Id, [{Id, self()}], Now}.
 
-forward_probe(Ref, T, Nodes, Id, {_, Spid}) ->
-    Spid ! {probe, Ref, [{Id, self()} | Nodes], T}.
+forward_probe(I, T, Nodes, Id, {_, Spid}) ->
+    Spid ! {probe, I, [{Id, self()} | Nodes], T}.
 
 remove_probe(T, Nodes) ->
     Now = erlang:system_time(microsecond),
