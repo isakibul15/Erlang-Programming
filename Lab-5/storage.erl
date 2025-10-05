@@ -10,7 +10,7 @@ add(K, V, Store) ->
 lookup(K, Store) ->
     case lists:keyfind(K, 1, Store) of
         false -> false;
-        {_, V} = KV -> KV
+        KV -> KV
     end.
 
 %% Keep keys in (From, To], return {Kept, Rest}

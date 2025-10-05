@@ -102,10 +102,10 @@ request(Peer, nil) -> Peer ! {status, nil};
 request(Peer, Pred = {_K,_Pid}) -> Peer ! {status, Pred}.
 
 %% notify with handover
-notify(New = {NKey, NPid}, _Id, nil, Store) ->
-    Keep = handover(Store, NKey, _Id = 0, NPid), % _Id not used in split calc here
+notify({NKey, NPid}, Id, nil, Store) ->
+    Keep = handover(Store, NKey, Id, NPid),
     {{NKey, NPid}, Keep};
-notify(New = {NKey, NPid}, Id, Pred = {PKey, _}, Store) ->
+notify({NKey, NPid}, Id, Pred = {PKey, _}, Store) ->
     case key:between(NKey, PKey, Id) of
         true  ->
             Keep = handover(Store, NKey, Id, NPid),
