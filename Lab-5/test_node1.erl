@@ -13,7 +13,6 @@ run() ->
     io:format("Starting node C joining B~n"),
     C = node1:start(key:generate(), B),
 
-   
     timer:sleep(3500),
 
     A ! {print, self()},
