@@ -1,4 +1,3 @@
-
 -module(node1).
 -export([start/1, start/2]).
 

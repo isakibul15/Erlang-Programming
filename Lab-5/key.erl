@@ -1,4 +1,3 @@
-
 -module(key).
 -export([generate/0, between/3]).
 
