@@ -4,7 +4,7 @@
 
 -define(Stabilize, 1000).
 -define(Replicate, 5000).
--define(Timeout, 2000).
+-define(Timeout, 10000).
 
 %% ===== API =====
 start(Id) -> start(Id, nil).
