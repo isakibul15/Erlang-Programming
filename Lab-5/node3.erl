@@ -94,7 +94,7 @@ node(Id, Predecessor, Successor, Next, Store) ->
 
 %% -------- stabilization --------
 schedule_stabilize() -> timer:send_interval(?Stabilize, self(), stabilize).
-stabilize({_, Spid, _}) -> Spid ! {request, self()}.
+stabilize({_, _Ref, Spid}) -> Spid ! {request, self()}.
 
 request(Peer, nil, Nx) -> Peer ! {status, nil, Nx};
 request(Peer, {PKey, _Ref, PPid}, Nx) -> Peer ! {status, {PKey, PPid}, Nx}.
@@ -161,12 +161,11 @@ do_lookup(Key, Qref, Client, Id, Pred, {_, _Ref, Spid}, Store) ->
 
 %% -------- probe --------
 create_probe(Id, {_, _Ref, Spid}) ->
-    Ref = make_ref(),
     Now = erlang:system_time(microsecond),
-    Spid ! {probe, Ref, [{Id, self()}], Now}.
+    Spid ! {probe, Id, [{Id, self()}], Now}.
 
-forward_probe(Ref, T, Nodes, Id, {_, _Ref, Spid}) ->
-    Spid ! {probe, Ref, [{Id, self()} | Nodes], T}.
+forward_probe(I, T, Nodes, Id, {_, _Ref, Spid}) ->
+    Spid ! {probe, I, [{Id, self()} | Nodes], T}.
 
 remove_probe(T, Nodes) ->
     Now = erlang:system_time(microsecond),
