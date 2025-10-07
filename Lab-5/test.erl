@@ -43,7 +43,7 @@ lookup(Key, Node) ->
 test_replication() ->
     io:format("Testing replication...~n"),
     
-    % Start three nodes
+    % Start three nodes - don't use registered names
     N1 = node4:start(nil),
     timer:sleep(1000),
     N2 = node4:start(N1),
@@ -119,16 +119,16 @@ performance_test() ->
     io:format("Starting performance test with replication...~n"),
     
     % Create a ring with 4 nodes
-    Nodes = [node4:start(nil)],
+    N1 = node4:start(nil),
     timer:sleep(1000),
     
-    Nodes2 = [node4:start(hd(Nodes)) | Nodes],
+    N2 = node4:start(N1),
     timer:sleep(1000),
     
-    Nodes3 = [node4:start(hd(Nodes2)) | Nodes2],
+    N3 = node4:start(hd([N1])),
     timer:sleep(1000),
     
-    Nodes4 = [node4:start(hd(Nodes3)) | Nodes3],
+    N4 = node4:start(hd([N1])),
     timer:sleep(2000),
     
     % Generate test keys
@@ -136,15 +136,15 @@ performance_test() ->
     
     % Add keys to the ring
     io:format("Adding ~w keys to the ring...~n", [length(TestKeys)]),
-    add_keys(TestKeys, hd(Nodes4)),
+    add_keys(TestKeys, N1),
     timer:sleep(1000),
     
     % Test lookups
     io:format("Testing lookups...~n"),
-    check(TestKeys, hd(Nodes4)),
+    check(TestKeys, N1),
     
     % Cleanup
-    lists:foreach(fun(Node) -> Node ! stop end, Nodes4).
+    [N1, N2, N3, N4] ! stop.
 
 run_all_tests() ->
     io:format("=== Running Replication Tests ===~n"),
