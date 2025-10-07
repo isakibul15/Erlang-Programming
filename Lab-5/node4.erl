@@ -1,277 +1,265 @@
-%% node4.erl — Chord (minimal) with monitors, 2-deep successors, replication
 -module(node4).
--export([start/1, start/2, add/3, lookup/2, probe/1, kill/1]).
+-export([start/1, start/2]).
+-export([init/2, node/6]).
+-export([stabilize/1, schedule_stabilize/0, stabilize/4, request/2, notify/4, handover/4]).
+-export([add/8, lookup/7, replicate/3]).
+-export([create_probe/2, remove_probe/2, forward_probe/5]).
 
 -define(Stabilize, 1000).
--define(Replicate, 5000).
--define(Timeout, 2000).
+-define(Timeout, 5000).
 
-%% ===================== API =====================
+start(Id) ->
+    start(Id, nil).
 
-start(Id)       -> start(Id, nil).
-start(Id, Peer) -> spawn(fun() -> init(Id, Peer) end).
-kill(Pid)       -> exit(Pid, kill).
-probe(Pid)      -> Pid ! probe, ok.
-
-add(Pid, Key, Val) ->
-    Qref = make_ref(),
-    Pid ! {add, Key, Val, Qref, self()},
-    receive {Qref, ok} -> ok after ?Timeout -> timeout end.
-
-lookup(Pid, Key) ->
-    Qref = make_ref(),
-    Pid ! {lookup, Key, Qref, self()},
-    receive {Qref, Result} -> Result after ?Timeout -> timeout end.
-
-%% ===================== Init =====================
-
-init(Id, nil) ->
-    schedule_stabilize(), schedule_replicate(),
-    Store = storage:create(),
-    Succ  = set_successor(undefined, {Id, self()}),
-    node(Id, nil, Succ, nil, nil, Store);
+start(Id, Peer) ->
+    register(node, self()),
+    timer:start(),
+    spawn(fun() -> init(Id, Peer) end).
 
 init(Id, Peer) ->
-    schedule_stabilize(), schedule_replicate(),
+    Predecessor = nil,
+    {ok, Successor} = connect(Id, Peer),
+    schedule_stabilize(),
     Store = storage:create(),
-    {ok, {SKey, Peer}} = connect(Id, Peer),
-    Succ  = set_successor(undefined, {SKey, Peer}),
-    node(Id, nil, Succ, nil, nil, Store).
+    Replica = storage:create(),
+    node(Id, Predecessor, Successor, Successor, Store, Replica).
 
-schedule_stabilize() -> timer:send_interval(?Stabilize, stabilize).
-schedule_replicate() -> timer:send_interval(?Replicate, replicate).
-
-%% ===================== Message loop =====================
-
-node(Id, Pred, Succ, Next, Succ2, Store) ->
+connect(Id, nil) ->
+    {ok, {Id, self(), self()}};
+connect(Id, Peer) ->
+    Qref = make_ref(),
+    Peer ! {key, Qref, self()},
     receive
-        %% --- key discovery for joins ---
+        {Qref, Skey} ->
+            {ok, {Skey, monitor(Peer), Peer}}
+    after ?Timeout ->
+            io:format("Time out: no response~n",[])
+    end.
+
+schedule_stabilize() ->
+    timer:send_interval(?Stabilize, self(), stabilize).
+
+node(Id, Predecessor, Successor, Next, Store, Replica) ->
+    receive
         {key, Qref, Peer} ->
             Peer ! {Qref, Id},
-            node(Id, Pred, Succ, Next, Succ2, Store);
-
-        %% --- stabilization tick / request from us to successor ---
-        stabilize ->
-            stabilize(Succ),
-            node(Id, Pred, Succ, Next, Succ2, Store);
-
-        %% --- successor replies with its predecessor and next ---
-        {status, PredOfSucc, NextOfSucc} ->
-            {Succ1, Next1, Succ2_1} = stabilize(PredOfSucc, NextOfSucc, Id, Succ, Next, Succ2),
-            node(Id, Pred, Succ1, Next1, Succ2_1, Store);
-
-        %% --- a peer asks our status (we're their successor) ---
+            node(Id, Predecessor, Successor, Next, Store, Replica);
+            
+        {notify, New, NewStore} ->
+            {NewPred, NewStore1} = notify(New, NewStore, Id, Predecessor, Store),
+            node(Id, NewPred, Successor, Next, NewStore1, Replica);
+            
         {request, Peer} ->
-            Peer ! {status, Pred, pub(Next)},
-            node(Id, Pred, Succ, Next, Succ2, Store);
-
-        %% --- notify: someone claims to be our predecessor ---
-        {notify, {NKey, NPid}} ->
-            {Pred1, Store1} = notify({NKey, NPid}, Id, Pred, Store),
-            node(Id, Pred1, Succ, Next, Succ2, Store1);
-
-        %% --- store ops (client) ---
-        {add, Key, Val, Qref, Client} ->
-            Store2 = do_add(Key, Val, Qref, Client, Id, Pred, Succ, Next, Succ2, Store),
-            node(Id, Pred, Succ, Next, Succ2, Store2);
-
+            request(Peer, Predecessor, Store),
+            node(Id, Predecessor, Successor, Next, Store, Replica);
+            
+        {status, Pred, Nx, PredStore} ->
+            {Succ, Nxt} = stabilize(Pred, Nx, Id, Successor),
+            % Update replica with predecessor's store
+            NewReplica = storage:merge(PredStore, Replica),
+            node(Id, Predecessor, Succ, Nxt, Store, NewReplica);
+            
+        stabilize ->
+            stabilize(Successor),
+            node(Id, Predecessor, Successor, Next, Store, Replica);
+            
+        {add, Key, Value, Qref, Client} ->
+            Added = add(Key, Value, Qref, Client, Id, Predecessor, Successor, Store),
+            node(Id, Predecessor, Successor, Next, Added, Replica);
+            
         {lookup, Key, Qref, Client} ->
-            do_lookup(Key, Qref, Client, Id, Pred, Succ, Store),
-            node(Id, Pred, Succ, Next, Succ2, Store);
-
-        %% --- replicas from owners ---
-        {replica, Key, Val} ->
-            node(Id, Pred, Succ, Next, Succ2, storage:add(Key, Val, Store));
-
-        %% --- range handover from successor that accepted us ---
+            lookup(Key, Qref, Client, Id, Predecessor, Successor, Store),
+            node(Id, Predecessor, Successor, Next, Store, Replica);
+            
         {handover, Elements} ->
-            node(Id, Pred, Succ, Next, Succ2, storage:merge(Elements, Store));
-
-        %% --- periodic replicate of our entire store to S2 (belt-and-suspenders) ---
-        replicate ->
-            replicate_all(Store, Next, Succ2),
-            node(Id, Pred, Succ, Next, Succ2, Store);
-
-        %% --- diagnostics ---
-        {print, From} ->
-            From ! {state, Id, Pred, Succ, Next, Succ2, Store},
-            node(Id, Pred, Succ, Next, Succ2, Store);
-
-        %% --- probe around the ring ---
-        probe ->
-            create_probe(Id, Succ),
-            node(Id, Pred, Succ, Next, Succ2, Store);
-
-        {probe, I, Nodes, T} when I =:= Id ->
+            Merged = storage:merge(Elements, Store),
+            node(Id, Predecessor, Successor, Next, Merged, Replica);
+            
+        {replicate, Key, Value} ->
+            % Add to replica store
+            NewReplica = storage:add(Key, Value, Replica),
+            node(Id, Predecessor, Successor, Next, Store, NewReplica);
+            
+        {'DOWN', Ref, process, _, _} ->
+            {Pred, Succ, Nxt, NewStore} = down(Ref, Predecessor, Successor, Next, Store, Replica),
+            node(Id, Pred, Succ, Nxt, NewStore, storage:create());
+            
+        {probe, Id, Nodes, T} ->
             remove_probe(T, Nodes),
-            node(Id, Pred, Succ, Next, Succ2, Store);
+            node(Id, Predecessor, Successor, Next, Store, Replica);
+            
+        {probe, Ref, Nodes, T} ->
+            forward_probe(Ref, T, Nodes, Id, Successor),
+            node(Id, Predecessor, Successor, Next, Store, Replica);
+            
+        stop ->
+            ok;
+            
+        _ ->
+            node(Id, Predecessor, Successor, Next, Store, Replica)
+    end.
 
-        {probe, I, Nodes, T} ->
-            forward_probe(I, T, Nodes, Id, Succ),
-            node(Id, Pred, Succ, Next, Succ2, Store);
-
-        %% --- failure handling via monitors ---
-        {'DOWN', Ref, process, _Pid, _Reason} ->
-            case which_ref(Ref, Succ, Next, Succ2) of
-                succ  ->
-                    {SuccN, NextN, Succ2N} = promote_successor(Id, Succ, Next, Succ2),
-                    node(Id, Pred, SuccN, NextN, Succ2N, Store);
-                next  ->
-                    node(Id, Pred, Succ, nil, Succ2, Store);
-                succ2 ->
-                    node(Id, Pred, Succ, Next, nil, Store);
-                none  ->
-                    node(Id, Pred, Succ, Next, Succ2, Store)
+%% Replication: When adding a key, also replicate to successor
+add(Key, Value, Qref, Client, Id, Predecessor, Successor, Store) ->
+    case Predecessor of
+        nil ->
+            % We are the only node, just add locally
+            Client ! {Qref, ok},
+            NewStore = storage:add(Key, Value, Store),
+            % Replicate to our own replica (since we're the only node)
+            self() ! {replicate, Key, Value},
+            NewStore;
+        {Pkey, Pref, Ppid} ->
+            case key:between(Key, Pkey, Id) of
+                true ->
+                    % This key belongs to us
+                    Client ! {Qref, ok},
+                    NewStore = storage:add(Key, Value, Store),
+                    % Replicate to successor
+                    case Successor of
+                        {Skey, Sref, Spid} when Spid =/= self() ->
+                            Spid ! {replicate, Key, Value};
+                        _ ->
+                            ok
+                    end,
+                    NewStore;
+                false ->
+                    % Forward to successor
+                    case Successor of
+                        {Skey, Sref, Spid} ->
+                            Spid ! {add, Key, Value, Qref, Client};
+                        _ ->
+                            Client ! {Qref, error}
+                    end,
+                    Store
             end
     end.
 
-%% ===================== Joining =====================
-
-connect(Id, nil) -> {ok, {Id, self()}};
-connect(_Id, Peer) ->
-    Qref = make_ref(),
-    Peer ! {key, Qref, self()},
-    receive {Qref, SKey} -> {ok, {SKey, Peer}}
-    after ?Timeout -> exit({timeout_connect, Peer})
+lookup(Key, Qref, Client, Id, Predecessor, Successor, Store) ->
+    case Predecessor of
+        nil ->
+            % We are the only node, check our store
+            Result = storage:lookup(Key, Store),
+            Client ! {Qref, Result};
+        {Pkey, _, _} ->
+            case key:between(Key, Pkey, Id) of
+                true ->
+                    % Check both store and replica
+                    case storage:lookup(Key, Store) of
+                        false ->
+                            Client ! {Qref, false};
+                        Result ->
+                            Client ! {Qref, Result}
+                    end;
+                false ->
+                    % Forward to successor
+                    case Successor of
+                        {Skey, Sref, Spid} ->
+                            Spid ! {lookup, Key, Qref, Client};
+                        _ ->
+                            Client ! {Qref, false}
+                    end
+            end
     end.
 
-%% ===================== Stabilization =====================
+%% Replicate key-value pair (for replication mechanism)
+replicate(Key, Value, Store) ->
+    storage:add(Key, Value, Store).
 
-stabilize({_,_,SPid}) when is_pid(SPid) -> SPid ! {request, self()};
-stabilize(_) -> ok.
+stabilize({_, _, Spid}) ->
+    Spid ! {request, self()}.
 
-stabilize(PredMsg, NxMsg, Id, Succ = {SKey,_SR,SPid}, Next, Succ2) ->
-    %% choose best successor and keep it monitored
-    Succ1 =
-        case PredMsg of
-            nil            -> SPid ! {notify, {Id, self()}}, Succ;
-            {Id,_}         -> Succ;
-            {SKey,_}       -> SPid ! {notify, {Id, self()}}, Succ;
-            {XKey, XPid}   ->
-                case key:between(XKey, Id, SKey) of
-                    true  -> XPid ! {request, self()}, set_successor(Succ, {XKey, XPid});
-                    false -> SPid ! {notify, {Id, self()}}, Succ
-                end
-        end,
-    %% set Next and Succ2 from NxMsg atomically
-    {Next1, Succ2_1} =
-        case NxMsg of
-            nil          -> {Next, Succ2};
-            {NK, NPid}   -> { set_next(Next, {NK, NPid})
-                            , set_succ2(Succ2, {NK, NPid}) }
-        end,
-    {Succ1, Next1, Succ2_1}.
-
-notify({NKey, NPid}, Id, nil, Store) ->
-    Keep = handover(Store, NKey, Id, NPid),
-    {{NKey, NPid}, Keep};
-notify({NKey, NPid}, Id, Pred = {PKey, _}, Store) ->
-    case key:between(NKey, PKey, Id) of
-        true  ->
-            Keep = handover(Store, NKey, Id, NPid),
-            {{NKey, NPid}, Keep};
-        false ->
-            {Pred, Store}
+stabilize(Pred, Next, Id, Successor) ->
+    {Skey, Sref, Spid} = Successor,
+    case Pred of
+        nil ->
+            Spid ! {notify, {Id, self()}, storage:create()},
+            {Successor, Next};
+        {Id, _} ->
+            {Successor, Next};
+        {Skey, _} ->
+            Spid ! {notify, {Id, self()}, storage:create()},
+            {Successor, Next};
+        {Xkey, Xref, Xpid} ->
+            case key:between(Xkey, Id, Skey) of
+                true ->
+                    drop(Sref),
+                    NewRef = monitor(Xpid),
+                    {Xkey, NewRef, Xpid} = Pred,
+                    stabilize(Pred, Next, Id, Pred);
+                false ->
+                    Spid ! {notify, {Id, self()}, storage:create()},
+                    {Successor, Next}
+            end
     end.
 
-handover(Store, NKey, Id, NPid) ->
-    {Keep, Rest} = storage:split(NKey, Id, Store),
-    NPid ! {handover, Rest},
+request(Peer, Predecessor, Store) ->
+    case Predecessor of
+        nil ->
+            Peer ! {status, nil, nil, storage:create()};
+        {Pkey, Pref, Ppid} ->
+            Peer ! {status, Predecessor, {Pkey, Pref, Ppid}, Store}
+    end.
+
+notify({Nkey, Npid}, NewStore, Id, Predecessor, Store) ->
+    case Predecessor of
+        nil ->
+            NewRef = monitor(Npid),
+            Keep = handover(Id, Store, Nkey, Npid),
+            {{Nkey, NewRef, Npid}, Keep};
+        {Pkey, Pref, Ppid} ->
+            case key:between(Nkey, Pkey, Id) of
+                true ->
+                    drop(Pref),
+                    NewRef = monitor(Npid),
+                    Keep = handover(Id, Store, Nkey, Npid),
+                    {{Nkey, NewRef, Npid}, Keep};
+                false ->
+                    {Predecessor, Store}
+            end
+    end.
+
+handover(Id, Store, Nkey, Npid) ->
+    {Keep, Rest} = storage:split(Id, Nkey, Store),
+    Npid ! {handover, Rest},
     Keep.
 
-%% ===================== Store responsibilities =====================
-
-responsible(_Key, _Id, nil) -> true;  %% single node owns all
-responsible(Key, Id, {PKey,_}) -> key:between(Key, PKey, Id).
-
-do_add(Key, Val, Qref, Client, Id, Pred, {_,_,Spid}=Succ, Next, Succ2, Store)
-  when is_pid(Spid) ->
-    case responsible(Key, Id, Pred) of
-        true  ->
-            %% owner: store and replicate to Next and Succ2
-            Client ! {Qref, ok},
-            Store1 = storage:add(Key, Val, Store),
-            send_replica(Key, Val, Next),
-            send_replica(Key, Val, Succ2),
-            Store1;
-        false ->
-            Spid ! {add, Key, Val, Qref, Client},
-            Store
-    end;
-do_add(_K,_V,Qref,Client,_Id,_Pred,_Succ,_Next,_Succ2,Store) ->
-    Client ! {Qref, timeout},
-    Store.
-
-do_lookup(Key, Qref, Client, Id, Pred, {_,_,Spid}, Store) when is_pid(Spid) ->
-    case responsible(Key, Id, Pred) of
-        true  -> Client ! {Qref, storage:lookup(Key, Store)};
-        false -> Spid ! {lookup, Key, Qref, Client}
-    end;
-do_lookup(_K, Qref, Client, _Id, _Pred, _Succ, _Store) ->
-    Client ! {Qref, timeout}.
-
-%% ===================== Replication helpers =====================
-
-send_replica(_K,_V, nil) -> ok;
-send_replica(Key, Val, {_,_,Pid}) when is_pid(Pid) ->
-    Pid ! {replica, Key, Val}, ok;
-send_replica(_,_,_) -> ok.
-
-replicate_all(_Store, nil, _S2) -> ok;
-replicate_all(Store, {_,_,NPid}, _S2) when is_pid(NPid) ->
-    lists:foreach(fun({K,V}) -> NPid ! {replica, K, V} end, Store), ok;
-replicate_all(_,_,_) -> ok.
-
-%% ===================== Successor/Next tuples and monitors =====================
-
-%% tuples are {Key, Ref, Pid}
-set_successor(Old, {K,Pid}) ->
-    maybe_demonitor(Old),
-    R = erlang:monitor(process, Pid),
-    {K,R,Pid}.
-set_next(Old, {K,Pid}) ->
-    maybe_demonitor(Old),
-    R = erlang:monitor(process, Pid),
-    {K,R,Pid}.
-set_succ2(Old, {K,Pid}) ->
-    maybe_demonitor(Old),
-    R = erlang:monitor(process, Pid),
-    {K,R,Pid}.
-
-maybe_demonitor({_,Ref,_}) when is_reference(Ref) -> erlang:demonitor(Ref, [flush]);
-maybe_demonitor(_) -> ok.
-
-pub(nil) -> nil;              %% strip ref for wire format
-pub({K,_,Pid}) -> {K,Pid}.
-
-which_ref(Ref, {_,SR,_}, _Next, _S2) when Ref =:= SR -> succ;
-which_ref(Ref, _S, {_,NR,_}, _S2)    when Ref =:= NR -> next;
-which_ref(Ref, _S, _N, {_,R,_})      when Ref =:= R  -> succ2;
-which_ref(_,    _,      _,     _)                     -> none.
-
-promote_successor(Id, _Succ, Next, Succ2) ->
-    case Next of
-        {NK,_NR,NPid} when is_pid(NPid) ->
-            { set_successor(undefined, {NK, NPid})
-            , Succ2
-            , nil };
+down(Ref, Predecessor, Successor, Next, Store, Replica) ->
+    case Predecessor of
+        {_, Ref, _} ->
+            % Predecessor died - merge replica into store
+            NewStore = storage:merge(Store, Replica),
+            {nil, Successor, Next, NewStore};
+        {Skey, Sref, Spid} when Sref == Ref ->
+            % Successor died - use next as new successor
+            case Next of
+                {Nkey, Nref, Npid} ->
+                    NewRef = monitor(Npid),
+                    {{Nkey, NewRef, Npid}, Next, Next, Store};
+                _ ->
+                    {Predecessor, Successor, Next, Store}
+            end;
         _ ->
-            { set_successor(undefined, {Id, self()}), nil, nil }
+            {Predecessor, Successor, Next, Store}
     end.
 
-%% ===================== Probe =====================
+monitor(Pid) when is_pid(Pid) ->
+    erlang:monitor(process, Pid).
 
-create_probe(Id, {_,_,Spid}) when is_pid(Spid) ->
-    T0 = erlang:system_time(microsecond),
-    Spid ! {probe, Id, [{Id, self()}], T0};
-create_probe(_, _) -> ok.
+drop(nil) ->
+    ok;
+drop(Ref) ->
+    erlang:demonitor(Ref, [flush]).
 
-forward_probe(I, T, Nodes, Id, {_,_,Spid}) when is_pid(Spid) ->
-    Spid ! {probe, I, [{Id, self()}|Nodes], T};
-forward_probe(_,_,_,_,_) -> ok.
+%% Probe functions
+create_probe(Id, Successor) ->
+    {Skey, Sref, Spid} = Successor,
+    Spid ! {probe, Id, [Id], erlang:system_time(micro_seconds)}.
 
 remove_probe(T, Nodes) ->
-    Now = erlang:system_time(microsecond),
-    Dt  = Now - T,
-    Ring = lists:reverse(Nodes),
-    io:format("Probe complete. Nodes=~p  time=~pus (~p ms)~n",[Ring, Dt, Dt/1000]).
+    Duration = erlang:system_time(micro_seconds) - T,
+    io:format("Probe completed: ~w nodes, time ~w microseconds~n", [length(Nodes), Duration]).
+
+forward_probe(Ref, T, Nodes, Id, Successor) ->
+    {Skey, Sref, Spid} = Successor,
+    Spid ! {probe, Ref, [Id | Nodes], T}.
