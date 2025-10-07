@@ -45,11 +45,11 @@ test_replication() ->
     
     % Start three nodes with proper delays for stabilization
     N1 = node4:start(nil),
-    timer:sleep(2000),
+    timer:sleep(3000),
     N2 = node4:start(N1),
-    timer:sleep(2000),
+    timer:sleep(3000),
     N3 = node4:start(N1),
-    timer:sleep(2000),
+    timer:sleep(3000),
     
     % Add some test data
     TestKey = 123456,
@@ -59,32 +59,45 @@ test_replication() ->
         ok -> io:format("Data added successfully~n");
         Error -> io:format("Failed to add data: ~p~n", [Error])
     end,
-    timer:sleep(1000),
+    timer:sleep(2000),
     
     % Verify data is accessible from all nodes
     io:format("Verifying data from all nodes...~n"),
     check_from_all([N1, N2, N3], TestKey, TestValue),
     
-    % Simulate node failure (kill N2 which should have replica of N1's data)
-    io:format("Simulating node failure...~n"),
-    exit(N2, kill),
+    % Simulate node failure (kill N1 which is the primary for the data)
+    io:format("Simulating node failure of N1 (primary node)...~n"),
+    exit(N1, kill),
     timer:sleep(3000),
     
-    % Try to lookup data again - it should survive due to replication
+    % Try to lookup data from N2 and N3 - it should survive due to replication
     io:format("Checking data survival after node failure...~n"),
-    case lookup(TestKey, N1) of
+    io:format("Checking N2 (should have replica): "),
+    case lookup(TestKey, N2) of
         {TestKey, TestValue} ->
-            io:format("SUCCESS: Data survived node failure due to replication!~n");
+            io:format("SUCCESS: Data found in N2 due to replication!~n");
         {error, _} ->
-            io:format("Lookup timeout after node failure~n");
+            io:format("Lookup timeout from N2~n");
         false ->
-            io:format("FAIL: Data lost after node failure~n");
+            io:format("FAIL: Data lost in N2~n");
         Other2 ->
-            io:format("Unexpected result after failure: ~p~n", [Other2])
+            io:format("Unexpected result from N2: ~p~n", [Other2])
+    end,
+    
+    io:format("Checking N3 (should not have data): "),
+    case lookup(TestKey, N3) of
+        {TestKey, TestValue} ->
+            io:format("UNEXPECTED: Data found in N3~n");
+        {error, _} ->
+            io:format("Lookup timeout from N3~n");
+        false ->
+            io:format("EXPECTED: Data not in N3 (only one replication)~n");
+        Other3 ->
+            io:format("Unexpected result from N3: ~p~n", [Other3])
     end,
     
     % Cleanup
-    N1 ! stop,
+    N2 ! stop,
     N3 ! stop.
 
 check_from_all([], _Key, _Value) -> ok;
@@ -135,12 +148,15 @@ check([Key|Keys], P, Failed, Timeout) ->
 performance_test() ->
     io:format("Starting performance test with replication...~n"),
     
-    % Create a ring with 2 nodes first
+    % Create a ring with 4 nodes for better testing
     N1 = node4:start(nil),
-    timer:sleep(2000),
-    
+    timer:sleep(3000),
     N2 = node4:start(N1),
-    timer:sleep(2000),
+    timer:sleep(3000),
+    N3 = node4:start(N1),
+    timer:sleep(3000),
+    N4 = node4:start(N1),
+    timer:sleep(3000),
     
     % Generate test keys
     TestKeys = keys(50),  % Reduced for testing
@@ -155,8 +171,7 @@ performance_test() ->
     check(TestKeys, N1),
     
     % Cleanup
-    N1 ! stop,
-    N2 ! stop.
+    lists:foreach(fun(Node) -> Node ! stop end, [N1, N2, N3, N4]).
 
 run_all_tests() ->
     io:format("=== Running Replication Tests ===~n"),
@@ -182,3 +197,16 @@ simple_test() ->
     end,
     
     N1 ! stop.
+
+%% Debug function to check ring structure
+debug_ring(Nodes) ->
+    io:format("Debugging ring structure:~n"),
+    lists:foreach(fun(Node) ->
+        Node ! {debug, self()},
+        receive
+            {debug_info, Id, Pred, Succ} ->
+                io:format("Node ~p: ID=~p, Pred=~p, Succ=~p~n", [Node, Id, Pred, Succ])
+        after 1000 ->
+                io:format("Node ~p: No response~n", [Node])
+        end
+    end, Nodes).

@@ -176,20 +176,23 @@ stabilize({_, _, Spid}) ->
     Spid ! {request, self()}.
 
 stabilize(Pred, Id, Successor) ->
+    {Skey, Sref, Spid} = Successor,
     case Pred of
         nil ->
+            Spid ! {notify, {Id, self()}},
             Successor;
         {Id, _} ->
             Successor;
-        {_Skey, _} ->
+        {Skey, _} ->
+            Spid ! {notify, {Id, self()}},
             Successor;
         {Xkey, _Xref, Xpid} ->
-            {Skey, _Sref, _Spid} = Successor,
             case key:between(Xkey, Id, Skey) of
                 true ->
-                    % Adopt this node as our successor
+                    drop(Sref),
                     {Xkey, monitor(Xpid), Xpid};
                 false ->
+                    Spid ! {notify, {Id, self()}},
                     Successor
             end
     end.
