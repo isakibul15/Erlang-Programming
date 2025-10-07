@@ -1,8 +1,8 @@
 -module(node4).
 -export([start/1, start/2]).
--export([init/2, node/6]).
--export([stabilize/1, schedule_stabilize/0, stabilize/3, request/2, notify/3, handover/4]).
--export([add/8, lookup/7]).
+-export([init/2, node/5]).
+-export([stabilize/1, schedule_stabilize/0, stabilize/3, request/2, notify/4, handover/4]).
+-export([add/8, lookup/8]).
 -export([create_probe/2, remove_probe/2, forward_probe/5]).
 
 -define(Stabilize, 1000).
@@ -181,7 +181,7 @@ stabilize(Pred, Id, Successor) ->
             Successor;
         {Id, _} ->
             Successor;
-        {Skey, _} ->
+        {_Skey, _} ->
             Successor;
         {Xkey, _Xref, Xpid} ->
             {Skey, _Sref, _Spid} = Successor,
