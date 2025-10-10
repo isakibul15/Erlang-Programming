@@ -1,236 +1,227 @@
-%%% ------------------------------------------------------------------
-%%% gms4: Atomic multicast with NACK-based loss recovery (optional task)
-%%% ------------------------------------------------------------------
 -module(gms4).
--export([start/1, start/2]).
+-export([start/1, start/2, stop/1]).
 
--define(HIST, 512).
--define(JOIN_TIMEOUT, 5000).
-
-%%% ========== Public API ==========
+%% Start the first node in the group (becomes leader)
 start(Id) ->
     Self = self(),
-    {ok, spawn_link(fun() -> init_first(Id, Self) end)}.
+    {ok, spawn_link(fun() -> init(Id, Self) end)}.
 
+init(Id, Master) ->
+    process_flag(trap_exit, true),
+    io:format(">>> NODE ~w: Starting as INITIAL LEADER~n", [Id]),
+    self() ! heartbeat,
+    leader(Id, Master, 1, [], [Master], #{}).
+
+%% Start a node that joins an existing group  
 start(Id, Grp) ->
     Self = self(),
-    {ok, spawn_link(fun() -> init_join(Id, Grp, Self) end)}.
+    {ok, spawn_link(fun() -> init(Id, Grp, Self) end)}.
 
-%%% ========== First node ==========
-init_first(Id, Master) ->
-    %% Leader state: Next, Slaves, Group, HQ/HM, Lossy, DropPct
-    Next = 1,
-    HQ = queue:new(),
-    HM = #{},
-    Lossy = false,
-    DropPct = 0,
-    leader(Id, Master, Next, [], [Master], HQ, HM, Lossy, DropPct).
-
-%%% ========== Join path ==========
-init_join(Id, Grp, Master) ->
+init(Id, Grp, Master) ->
+    process_flag(trap_exit, true),
     Self = self(),
-    Grp ! {join, Master, Self},
+    io:format(">>> NODE ~w: Joining group via ~w~n", [Id, Grp]),
+    reliable_send(Grp, {join, Master, Self}),
     receive
-        {view, Seq, [Leader|Slaves], Group} ->
+        {view, N, [Leader|Slaves], Group} ->
             Master ! {view, Group},
-            Mon = erlang:monitor(process, Leader),
-            Expected = Seq + 1,
-            Last = {view, Seq, [Leader|Slaves], Group},
-            Pending = #{},
-            HQ = queue:from_list([Seq]),
-            HM = #{ Seq => Last },
-            %% carry Lossy flags in slave state for test convenience
-            Lossy = false, DropPct = 0,
-            slave(Id, Master, Leader, Mon, Expected, Last,
-                  Slaves, Group, Pending, HQ, HM, Lossy, DropPct)
-    after ?JOIN_TIMEOUT ->
+            MonitorRef = erlang:monitor(process, Leader),
+            io:format(">>> NODE ~w: Joined group. Leader: ~w, Slaves: ~w~n", [Id, Leader, Slaves]),
+            slave(Id, Master, Leader, MonitorRef, N+1, 
+                  {view, N, [Leader|Slaves], Group}, Slaves, Group, #{})
+    after 3000 ->
         Master ! {error, "no reply from leader"}
     end.
 
-%%% ========== Leader ==========
-leader(Id, Master, Next, Slaves, Group, HQ, HM, Lossy, DropPct) ->
+%% Leader process with strategic logging
+leader(Id, Master, W, Slaves, Group, PendingAcks) ->
     receive
-        %% Control: enable/disable lossy multicast (test hook)
-        {mcast, {ctl_set_lossy, Enable, Pct}} when is_boolean(Enable), is_integer(Pct) ->
-            io:format("leader ~w: lossy=~p drop=~p%~n", [Id, Enable, Pct]),
-            leader(Id, Master, Next, Slaves, Group, HQ, HM, Enable, Pct);
-
-        %% App/peer multicast
         {mcast, Msg} ->
-            M = {msg, Next, Msg},
-            bcast(M, Slaves, Lossy, DropPct),
+            io:format(">>> LEADER ~w: Multicasting message (seq ~w) to ~w slaves~n", 
+                     [Id, W, length(Slaves)]),
+            Message = {msg, W, Msg},
+            bcast_reliable(Message, Slaves, PendingAcks, W),
             Master ! Msg,
-            {HQ2, HM2} = hist_put(Next, M, HQ, HM),
-            leader(Id, Master, Next+1, Slaves, Group, HQ2, HM2, Lossy, DropPct);
-
-        %% Join request
+            leader(Id, Master, W+1, Slaves, Group, 
+                   PendingAcks#{W => {Message, Slaves, 0}});
+        
+        {ack, From, Seq} ->
+            case PendingAcks of
+                #{Seq := {Message, RemainingSlaves, RetryCount}} ->
+                    NewRemaining = lists:delete(From, RemainingSlaves),
+                    case NewRemaining of
+                        [] -> 
+                            io:format(">>> LEADER ~w: All ACKs received for seq ~w~n", [Id, Seq]),
+                            leader(Id, Master, W, Slaves, Group, maps:remove(Seq, PendingAcks));
+                        _ ->
+                            io:format(">>> LEADER ~w: ACK from ~w for seq ~w, waiting for ~w more~n", 
+                                    [Id, From, Seq, length(NewRemaining)]),
+                            leader(Id, Master, W, Slaves, Group, 
+                                   PendingAcks#{Seq := {Message, NewRemaining, RetryCount}})
+                    end;
+                _ ->
+                    leader(Id, Master, W, Slaves, Group, PendingAcks)
+            end;
+        
         {join, Wrk, Peer} ->
+            io:format(">>> LEADER ~w: Adding new node ~w to group~n", [Id, Peer]),
             Slaves2 = Slaves ++ [Peer],
-            Group2  = Group  ++ [Wrk],
-            V = {view, Next, [self()|Slaves2], Group2},
-            bcast(V, Slaves2, Lossy, DropPct),
+            Group2 = Group ++ [Wrk],
+            ViewMessage = {view, W, [self()|Slaves2], Group2},
+            bcast_reliable(ViewMessage, Slaves2, PendingAcks, W),
             Master ! {view, Group2},
-            {HQ2, HM2} = hist_put(Next, V, HQ, HM),
-            leader(Id, Master, Next+1, Slaves2, Group2, HQ2, HM2, Lossy, DropPct);
-
-        %% NACK: resend reliably from history
-        {nack, From, FromSeq, ToSeq} when FromSeq =< ToSeq ->
-            resend_range(From, FromSeq, ToSeq, HM),
-            leader(Id, Master, Next, Slaves, Group, HQ, HM, Lossy, DropPct);
-
-        stop -> ok;
-
+            leader(Id, Master, W+1, Slaves2, Group2, 
+                   PendingAcks#{W => {ViewMessage, Slaves2, 0}});
+        
+        {retransmit, Seq} ->
+            case PendingAcks of
+                #{Seq := {Message, RemainingSlaves, RetryCount}} when RetryCount < 3 ->
+                    io:format(">>> LEADER ~w: Retransmitting seq ~w (attempt ~w) to ~w nodes~n", 
+                             [Id, Seq, RetryCount + 1, length(RemainingSlaves)]),
+                    lists:foreach(fun(Slave) -> Slave ! Message end, RemainingSlaves),
+                    erlang:send_after(500, self(), {retransmit, Seq}),
+                    leader(Id, Master, W, Slaves, Group, 
+                           PendingAcks#{Seq := {Message, RemainingSlaves, RetryCount + 1}});
+                #{Seq := {_Message, RemainingSlaves, _RetryCount}} ->
+                    io:format("!!! LEADER ~w: MAX RETRIES for seq ~w, ~w nodes still missing~n", 
+                             [Id, Seq, length(RemainingSlaves)]),
+                    leader(Id, Master, W, Slaves, Group, maps:remove(Seq, PendingAcks));
+                _ ->
+                    leader(Id, Master, W, Slaves, Group, PendingAcks)
+            end;
+        
+        heartbeat ->
+            case Slaves of
+                [] -> 
+                    ok;
+                _ -> 
+                    bcast_reliable({heartbeat, W}, Slaves, PendingAcks, W)
+            end,
+            erlang:send_after(300, self(), heartbeat),
+            leader(Id, Master, W, Slaves, Group, PendingAcks);
+        
+        {'EXIT', _Pid, _Reason} -> ok;
+        stop -> 
+            io:format(">>> LEADER ~w: Received stop command~n", [Id]),
+            ok;
         Unexpected ->
-            io:format("leader ~w: unexpected ~p~n", [Id, Unexpected]),
-            leader(Id, Master, Next, Slaves, Group, HQ, HM, Lossy, DropPct)
+            io:format("??? LEADER ~w: Unexpected message: ~w~n", [Id, Unexpected]),
+            leader(Id, Master, W, Slaves, Group, PendingAcks)
     end.
 
-%%% ========== Slave ==========
-slave(Id, Master, Leader, Mon, Expected, Last, Slaves, Group,
-      Pending, HQ, HM, Lossy, DropPct) ->
+%% Slave process with strategic logging
+slave(Id, Master, Leader, MonitorRef, W, Last, Slaves, Group, PendingMsgs) ->
     receive
-        %% Forward app multicasts
         {mcast, Msg} ->
-            Leader ! {mcast, Msg},
-            slave(Id, Master, Leader, Mon, Expected, Last, Slaves, Group, Pending, HQ, HM, Lossy, DropPct);
-
-        %% Allow test to toggle lossy via multicast control
-        {send, {ctl_set_lossy, Enable, Pct}} ->
-            %% Use worker's send->mcast path; just forward a multicast control
-            Leader ! {mcast, {ctl_set_lossy, Enable, Pct}},
-            slave(Id, Master, Leader, Mon, Expected, Last, Slaves, Group, Pending, HQ, HM, Enable, Pct);
-
+            io:format(">>> SLAVE ~w: Forwarding message to leader ~w~n", [Id, Leader]),
+            reliable_send(Leader, {mcast, Msg}),
+            slave(Id, Master, Leader, MonitorRef, W, Last, Slaves, Group, PendingMsgs);
+        
         {join, Wrk, Peer} ->
-            Leader ! {join, Wrk, Peer},
-            slave(Id, Master, Leader, Mon, Expected, Last, Slaves, Group, Pending, HQ, HM, Lossy, DropPct);
+            reliable_send(Leader, {join, Wrk, Peer}),
+            slave(Id, Master, Leader, MonitorRef, W, Last, Slaves, Group, PendingMsgs);
+        
+        {msg, I, Msg} ->
+            if 
+                I < W ->
+                    io:format(">>> SLAVE ~w: Duplicate message ~w (already at ~w), sending ACK~n", [Id, I, W]),
+                    reliable_send(Leader, {ack, self(), I}),
+                    slave(Id, Master, Leader, MonitorRef, W, Last, Slaves, Group, PendingMsgs);
+                I == W ->
+                    io:format(">>> SLAVE ~w: Processing message ~w, sending ACK~n", [Id, I]),
+                    Master ! Msg,
+                    reliable_send(Leader, {ack, self(), I}),
+                    slave(Id, Master, Leader, MonitorRef, W+1, {msg, I, Msg}, % Store last processed message
+                          Slaves, Group, PendingMsgs);
+                I > W ->
+                    io:format(">>> SLAVE ~w: Future message ~w (expected ~w), storing~n", [Id, I, W]),
+                    NewPending = PendingMsgs#{I => {msg, I, Msg}},
+                    slave(Id, Master, Leader, MonitorRef, W, Last, Slaves, Group, NewPending)
+            end;
+        
 
-        %% Numbered regular messages
-        {msg, I, _} when I < Expected ->
-            %% duplicate, ignore
-            slave(Id, Master, Leader, Mon, Expected, Last, Slaves, Group, Pending, HQ, HM, Lossy, DropPct);
-
-        {msg, I, Msg} when I == Expected ->
-            Master ! Msg,
-            {Expected2, Last2, Pending2, HQ2, HM2} =
-                drain_in_order(Expected+1, {msg, I, Msg}, Pending, HQ, HM, Master),
-            slave(Id, Master, Leader, Mon, Expected2, Last2, Slaves, Group, Pending2, HQ2, HM2, Lossy, DropPct);
-
-        {msg, I, Msg} when I > Expected ->
-            io:format("slave ~w: gap on msg, expect=~p got=~p -> NACK ~p..~p~n",
-                      [Id, Expected, I, Expected, I-1]),
-            Pending2 = Pending#{ I => {msg, I, Msg} },
-            Leader ! {nack, self(), Expected, I-1},
-            slave(Id, Master, Leader, Mon, Expected, Last, Slaves, Group, Pending2, HQ, HM, Lossy, DropPct);
-
-        %% Numbered views
-        {view, I, [NewLeader|_], _} when I < Expected ->
-            slave(Id, Master, Leader, Mon, Expected, Last, Slaves, Group, Pending, HQ, HM, Lossy, DropPct);
-
-        {view, I, [NewLeader|Slaves2], Group2} when I == Expected ->
-            Master ! {view, Group2},
-            erlang:demonitor(Mon, [flush]),
-            NewMon = erlang:monitor(process, NewLeader),
-            V = {view, I, [NewLeader|Slaves2], Group2},
-            {Expected2, Last2, Pending2, HQ2, HM2} =
-                drain_in_order(Expected+1, V, Pending, HQ, HM, Master),
-            slave(Id, Master, NewLeader, NewMon, Expected2, Last2, Slaves2, Group2, Pending2, HQ2, HM2, Lossy, DropPct);
-
-        {view, I, Peers, Group2} when I > Expected ->
-            io:format("slave ~w: gap on view, expect=~p got=~p -> NACK ~p..~p~n",
-                      [Id, Expected, I, Expected, I-1]),
-            Pending2 = Pending#{ I => {view, I, Peers, Group2} },
-            Leader ! {nack, self(), Expected, I-1},
-            slave(Id, Master, Leader, Mon, Expected, Last, Slaves, Group, Pending2, HQ, HM, Lossy, DropPct);
-
-        %% Leader died: elect
-        {'DOWN', Mon, process, Leader, _Reason} ->
-            election(Id, Master, Expected, Last, Slaves, Group, Pending, HQ, HM, Lossy, DropPct);
-
-        stop -> ok;
-
+        {view, I, [NewLeader|Slaves2], Group2} ->
+            if 
+                I < W ->
+                    reliable_send(Leader, {ack, self(), I}),
+                    slave(Id, Master, Leader, MonitorRef, W, Last, Slaves, Group, PendingMsgs);
+                I == W ->
+                    io:format(">>> SLAVE ~w: Updating view, new leader: ~w~n", [Id, NewLeader]),
+                    Master ! {view, Group2},
+                    reliable_send(Leader, {ack, self(), I}),
+                    erlang:demonitor(MonitorRef, [flush]),
+                    NewMonitorRef = erlang:monitor(process, NewLeader),
+                    slave(Id, Master, NewLeader, NewMonitorRef, W+1, 
+                          {view, I, [NewLeader|Slaves2], Group2}, Slaves2, Group2, PendingMsgs);
+                I > W ->
+                    NewPending = PendingMsgs#{I => {view, I, [NewLeader|Slaves2], Group2}},
+                    slave(Id, Master, Leader, MonitorRef, W, Last, Slaves, Group, NewPending)
+            end;
+        
+        {heartbeat, Seq} ->
+            reliable_send(Leader, {ack, self(), Seq}),
+            slave(Id, Master, Leader, MonitorRef, W, Last, Slaves, Group, PendingMsgs);
+        
+        {'DOWN', MonitorRef, process, Leader, Reason} ->
+            io:format("!!! SLAVE ~w: LEADER ~w IS DOWN! Reason: ~w~n", [Id, Leader, Reason]),
+            io:format("!!! SLAVE ~w: Starting election process...~n", [Id]),
+            reliable_election(Id, Master, W, Last, Slaves, Group, PendingMsgs);
+        
+        {retry, Msg} ->
+            io:format(">>> SLAVE ~w: Retrying message to leader~n", [Id]),
+            reliable_send(Leader, Msg),
+            slave(Id, Master, Leader, MonitorRef, W, Last, Slaves, Group, PendingMsgs);
+        
+        {'EXIT', _Pid, _Reason} -> ok;
+        stop -> 
+            io:format(">>> SLAVE ~w: Received stop command~n", [Id]),
+            ok;
         Unexpected ->
-            io:format("slave ~w: unexpected ~p~n", [Id, Unexpected]),
-            slave(Id, Master, Leader, Mon, Expected, Last, Slaves, Group, Pending, HQ, HM, Lossy, DropPct)
+            io:format("??? SLAVE ~w: Unexpected message: ~w~n", [Id, Unexpected]),
+            slave(Id, Master, Leader, MonitorRef, W, Last, Slaves, Group, PendingMsgs)
     end.
 
-%%% ========== Election with history carry-over ==========
-election(Id, Master, Expected, Last, Slaves, [_|Group], Pending, HQ, HM, Lossy, DropPct) ->
+%% Election with detailed logging
+reliable_election(Id, Master, W, Last, Slaves, Group, PendingMsgs) ->
     Self = self(),
+    io:format("*** ELECTION: Node ~w checking if it should become leader~n", [Id]),
+    io:format("*** ELECTION: Current slaves list: ~w~n", [Slaves]),
     case Slaves of
         [Self|Rest] ->
-            io:format("Node ~w: I am the new leader (gms4), resending last and serving NACKs~n", [Id]),
-            %% close any half-broadcast
-            bcast(Last, Rest, false, 0),  %% reliable resend
-            Master ! case Last of {view,_,_,G} -> {view, G}; {msg,_,M} -> M end,
-            leader(Id, Master, Expected, Rest, Group, HQ, HM, Lossy, DropPct);
+            io:format("*** ELECTION: Node ~w BECOMING NEW LEADER!~n", [Id]),
+            io:format("*** ELECTION: Resending last message to ensure no loss~n"),
+            self() ! heartbeat,
+            bcast_reliable(Last, Rest, #{}, W),  %% Resend last message to slaves
+            bcast_reliable({view, W, [Self|Rest], Group}, Rest, #{}, W),
+            Master ! {view, Group},
+            io:format("*** ELECTION: Node ~w transitioned to LEADER role~n", [Id]),
+            leader(Id, Master, W+1, Rest, Group, #{});
         [NewLeader|Rest] ->
-            io:format("Node ~w: Electing ~w as new leader (gms4)~n", [Id, NewLeader]),
-            Mon = erlang:monitor(process, NewLeader),
-            slave(Id, Master, NewLeader, Mon, Expected, Last, Rest, Group, Pending, HQ, HM, Lossy, DropPct)
+            io:format("*** ELECTION: Node ~w electing ~w as new leader~n", [Id, NewLeader]),
+            MonitorRef = erlang:monitor(process, NewLeader),
+            slave(Id, Master, NewLeader, MonitorRef, W, Last, Rest, Group, PendingMsgs)
     end.
 
-%%% ========== Utilities ==========
-bcast(Msg, Nodes, Lossy, DropPct) ->
-    lists:foreach(
-      fun(N) ->
-          case Lossy of
-              false -> N ! Msg;
-              true  ->
-                  %% probabilistically drop on a per-destination basis
-                  case rand:uniform(100) =< DropPct of
-                      true  -> ok;
-                      false -> N ! Msg
-                  end
-          end
-      end, Nodes).
-
-resend_range(To, FromSeq, ToSeq, HM) ->
-    lists:foreach(
-      fun(S) ->
-          case maps:get(S, HM, undefined) of
-              undefined -> ok;
-              M -> To ! M
-          end
-      end,
-      lists:seq(FromSeq, ToSeq)).
-
-hist_put(Seq, M, HQ, HM) ->
-    HQ1 = queue:in(Seq, HQ),
-    HM1 = HM#{ Seq => M },
-    trim_hist(HQ1, HM1).
-
-trim_hist(HQ, HM) ->
-    case queue:len(HQ) > ?HIST of
-        true ->
-            {{value, Old}, HQ2} = queue:out(HQ),
-            {HQ2, maps:remove(Old, HM)};
-        false ->
-            {HQ, HM}
+%% Broadcast helper
+bcast_reliable(Msg, Nodes, PendingAcks, Seq) ->
+    io:format(">>> BROADCAST: Sending to ~w nodes: ~w~n", [length(Nodes), element(1, Msg)]),
+    lists:foreach(fun(Node) -> Node ! Msg end, Nodes),
+    case Msg of
+        {msg, S, _} -> erlang:send_after(500, self(), {retransmit, S});
+        {view, S, _, _} -> erlang:send_after(500, self(), {retransmit, S});
+        _ -> ok
     end.
 
-%% Drain pending consecutive messages starting from ExpectedNext
-drain_in_order(ExpectedNext, ThisM, Pending, HQ, HM, Master) ->
-    {Exp1, Last1, HQ1, HM1} = deliver_in_order(ThisM, ExpectedNext, HQ, HM, Master),
-    drain_loop(Exp1, Last1, Pending, HQ1, HM1, Master).
-
-drain_loop(Expected, Last, Pending, HQ, HM, Master) ->
-    case maps:get(Expected, Pending, undefined) of
-        undefined ->
-            {Expected, Last, Pending, HQ, HM};
-        M ->
-            Pending2 = maps:remove(Expected, Pending),
-            {Exp1, Last1, HQ1, HM1} = deliver_in_order(M, Expected+1, HQ, HM, Master),
-            drain_loop(Exp1, Last1, Pending2, HQ1, HM1, Master)
+%% Reliable send helper
+reliable_send(Dest, Msg) ->
+    Dest ! Msg,
+    case Msg of
+        {mcast, _} -> erlang:send_after(500, self(), {retry, Msg});
+        {join, _, _} -> erlang:send_after(500, self(), {retry, Msg});
+        _ -> ok
     end.
 
-deliver_in_order(M, NextAfter, HQ, HM, Master) ->
-    case M of
-        {msg, I, Msg} ->
-            Master ! Msg,
-            {HQ2, HM2} = hist_put(I, M, HQ, HM),
-            {NextAfter, {msg, I, Msg}, HQ2, HM2};
-        {view, I, _Peers, Group2} ->
-            Master ! {view, Group2},
-            {HQ2, HM2} = hist_put(I, M, HQ, HM),
-            {NextAfter, {view, I, _Peers, Group2}, HQ2, HM2}
-    end.
+%% Stop a node
+stop(Node) ->
+    io:format(">>> Sending stop command to node ~w~n", [Node]),
+    Node ! stop.

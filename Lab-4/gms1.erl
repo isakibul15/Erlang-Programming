@@ -38,7 +38,7 @@ leader(Id, Master, Slaves, Group) ->
             Group2 = lists:append(Group, [Wrk]),
             bcast({view, [self()|Slaves2], Group2}, Slaves2),
             Master ! {view, Group2},
-            leader(Id, Master, Slaves2, Group2);
+            leader(Id, Master, Slaves2, Group2);  % New view sent to all slaves including new one.
         
         stop ->
             ok;
