@@ -93,7 +93,7 @@ node(Id, Predecessor, Successor, Next, Store) ->
     end.
 
 %% -------- stabilization --------
-schedule_stabilize() -> timer:send_interval(?Stabilize, self(), stabilize).
+schedule_stabilize() -> timer:send_interval(?Stabilize, self(), stabilize). 
 stabilize({_, _Ref, Spid}) -> Spid ! {request, self()}.
 
 request(Peer, nil, Nx) -> Peer ! {status, nil, Nx};
